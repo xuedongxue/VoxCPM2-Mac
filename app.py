@@ -44,7 +44,7 @@ class RayServeVoxCPMClient:
         
         try:
             # Ray Serve API URL (can be overridden via env)
-            self.RAY_SERVE_DEFAULT_URL = "https://d09162224-pytorch251-cuda124-u-5512-iyr4lse3-8970.550c.cloud"
+            self.RAY_SERVE_DEFAULT_URL = "https://d09170151-pytorch251-cuda124-u-5512-5ujwyr42-8970.550c.cloud"
             self.api_url = self._resolve_server_url()
             logger.info(f"🔗 准备连接到Ray Serve API: {self.api_url}")
             
@@ -148,12 +148,12 @@ class RayServeVoxCPMClient:
             
             logger.info("📡 调用Ray Serve ASR API...")
             
-            # 构建ASR请求
+            # 构建ASR请求 - 匹配 voxcpm_api.py 格式
             asr_request = {
-                "reqid": str(uuid.uuid4()),
                 "audio_data": audio_base64,
                 "language": "auto",
-                "use_itn": True
+                "use_itn": True,
+                "reqid": str(uuid.uuid4())
             }
             
             # 调用ASR接口
@@ -172,15 +172,25 @@ class RayServeVoxCPMClient:
             
             logger.info(f"⏱️  ASR API请求耗时: {api_time:.3f}秒")
             logger.info(f"⏱️  ASR总耗时: {total_time:.3f}秒")
-            logger.info(f"✅ 语音识别完成，响应: {result_data}")
+            logger.info(f"🔍 完整的ASR响应: {result_data}")
+            logger.info(f"📊 ASR响应类型: {type(result_data)}")
+            logger.info(f"📊 ASR响应字段: {list(result_data.keys()) if isinstance(result_data, dict) else 'N/A'}")
             
-            # 检查响应状态
-            if result_data.get("code") == 3000:
+            # 检查响应状态 - 基于实际响应格式，ASR有多种成功标识
+            if isinstance(result_data, dict) and "text" in result_data and (
+                result_data.get("code") == 3000 or result_data.get("status") == "ok"
+            ):
                 recognized_text = result_data.get("text", "")
                 logger.info(f"🎯 识别结果: '{recognized_text}'")
                 return recognized_text
             else:
-                logger.warning(f"⚠️  ASR识别失败: {result_data.get('message', 'Unknown error')}")
+                logger.warning(f"⚠️  ASR响应验证失败:")
+                logger.warning(f"   - 是否为字典: {isinstance(result_data, dict)}")
+                if isinstance(result_data, dict):
+                    logger.warning(f"   - code字段: {result_data.get('code')}")
+                    logger.warning(f"   - 是否有text字段: {'text' in result_data}")
+                    logger.warning(f"   - message字段: {result_data.get('message')}")
+                logger.warning(f"⚠️  完整ASR响应: {result_data}")
                 return ""
                 
         except Exception as e:
@@ -206,17 +216,18 @@ class RayServeVoxCPMClient:
         try:
             start_time = time.time()
             
-            # 构建请求数据
+            # 构建请求数据 - 匹配 voxcpm_api.py 格式
             prepare_start = time.time()
-            audio_config = {
-                "voice_type": "default",  # 使用默认模式，或者可以根据需要调整
-                "encoding": "wav",
-                "speed_ratio": 1.0,
+            request_data = {
+                "text": text,
                 "cfg_value": cfg_value,
-                "inference_timesteps": inference_timesteps
+                "inference_timesteps": inference_timesteps,
+                "do_normalize": do_normalize,
+                "denoise": denoise,
+                "reqid": str(uuid.uuid4())
             }
             
-            # 如果有参考音频和文本，使用voice-clone模式
+            # 如果有参考音频和文本，添加到请求中
             if prompt_wav_path and prompt_text:
                 logger.info("🎭 使用语音克隆模式")
                 convert_start = time.time()
@@ -224,24 +235,12 @@ class RayServeVoxCPMClient:
                 convert_time = time.time() - convert_start
                 logger.info(f"🔄 参考音频转base64耗时: {convert_time:.3f}秒")
                 
-                audio_config.update({
-                    "voice_type": None,  # 清除voice_type，使用克隆模式
+                request_data.update({
                     "prompt_wav": audio_base64,
                     "prompt_text": prompt_text
                 })
             else:
                 logger.info("🎤 使用默认语音模式")
-            
-            request_data = {
-                "audio": audio_config,
-                "request": {
-                    "reqid": str(uuid.uuid4()),
-                    "text": text,
-                    "operation": "query",
-                    "do_normalize": do_normalize,
-                    "denoise": denoise
-                }
-            }
             prepare_time = time.time() - prepare_start
             logger.info(f"⏱️  请求数据准备耗时: {prepare_time:.3f}秒")
             
@@ -261,14 +260,15 @@ class RayServeVoxCPMClient:
             
             result_data = response.json()
             logger.info(f"⏱️  TTS API请求耗时: {api_time:.3f}秒")
-            logger.info(f"✅ Ray Serve响应: code={result_data.get('code')}, message={result_data.get('message')}")
+            logger.info(f"🔍 完整的Ray Serve响应: {result_data}")
+            logger.info(f"📊 响应类型: {type(result_data)}")
+            logger.info(f"📊 响应字段: {list(result_data.keys()) if isinstance(result_data, dict) else 'N/A'}")
             
-            # 检查响应状态
-            if result_data.get("code") == 3000:
+            # 检查响应状态 - 基于实际响应格式，TTS响应没有code字段，只检查data
+            if isinstance(result_data, dict) and "data" in result_data and isinstance(result_data["data"], str) and result_data["data"]:
                 # 成功生成音频
-                audio_base64 = result_data.get("data", "")
-                if not audio_base64:
-                    raise RuntimeError("Ray Serve返回的音频数据为空")
+                audio_base64 = result_data["data"]
+                logger.info(f"✅ 找到音频数据，base64长度: {len(audio_base64)}")
                 
                 # 将base64音频转换为numpy数组
                 decode_start = time.time()
@@ -284,8 +284,18 @@ class RayServeVoxCPMClient:
                 
                 return sample_rate, audio_array
             else:
-                error_msg = result_data.get("message", "Unknown error")
-                raise RuntimeError(f"Ray Serve生成失败: {error_msg}")
+                logger.error(f"❌ 响应验证失败:")
+                logger.error(f"   - 是否为字典: {isinstance(result_data, dict)}")
+                if isinstance(result_data, dict):
+                    logger.error(f"   - 是否有data字段: {'data' in result_data}")
+                    if "data" in result_data:
+                        logger.error(f"   - data字段类型: {type(result_data['data'])}")
+                        logger.error(f"   - data字段是否为字符串: {isinstance(result_data['data'], str)}")
+                        if isinstance(result_data['data'], str):
+                            logger.error(f"   - data字段是否非空: {bool(result_data['data'])}")
+                            logger.error(f"   - data字段长度: {len(result_data['data'])}")
+                logger.error(f"❌ 完整响应内容: {result_data}")
+                raise RuntimeError(f"Ray Serve没有返回有效的音频数据。响应: {result_data}")
                 
         except requests.exceptions.RequestException as e:
             logger.error(f"❌ Ray Serve请求失败: {e}")
@@ -381,21 +391,6 @@ def create_demo_interface(client: RayServeVoxCPMClient):
             max-width: 200px;
             display: inline-block;
         }
-        .overload-notice {
-            background: linear-gradient(90deg, #ff6b6b, #ffa500);
-            color: white;
-            padding: 12px 20px;
-            margin: 10px 0;
-            border-radius: 8px;
-            text-align: center;
-            font-weight: 600;
-            font-size: 16px;
-            box-shadow: 0 2px 8px rgba(255, 107, 107, 0.3);
-            border: 1px solid #ff4757;
-        }
-        .overload-notice .icon {
-            margin-right: 8px;
-        }
         /* Bold labels for specific checkboxes */
         #chk_denoise label,
         #chk_denoise span,
@@ -406,9 +401,6 @@ def create_demo_interface(client: RayServeVoxCPMClient):
         """
     ) as interface:
         gr.HTML('<div class="logo-container"><img src="/gradio_api/file=assets/voxcpm-logo.png" alt="VoxCPM Logo"></div>')
-        
-        # Service Overload Notice
-        gr.HTML('<div class="overload-notice"><span class="icon">⚠️</span>Our service is currently overloaded and under maintenance. Please expect delays or try again later.</div>')
 
         # Quick Start
         with gr.Accordion("📋 Quick Start Guide | 快速入门", open=False):
@@ -517,7 +509,7 @@ def create_demo_interface(client: RayServeVoxCPMClient):
             outputs=[audio_output],
             show_progress=True,
             api_name="generate",
-            concurrency_limit=5,
+            concurrency_limit=None,
         )
         prompt_wav.change(fn=client.prompt_wav_recognition, inputs=[prompt_wav], outputs=[prompt_text])
         
