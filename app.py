@@ -381,6 +381,21 @@ def create_demo_interface(client: RayServeVoxCPMClient):
             max-width: 200px;
             display: inline-block;
         }
+        .overload-notice {
+            background: linear-gradient(90deg, #ff6b6b, #ffa500);
+            color: white;
+            padding: 12px 20px;
+            margin: 10px 0;
+            border-radius: 8px;
+            text-align: center;
+            font-weight: 600;
+            font-size: 16px;
+            box-shadow: 0 2px 8px rgba(255, 107, 107, 0.3);
+            border: 1px solid #ff4757;
+        }
+        .overload-notice .icon {
+            margin-right: 8px;
+        }
         /* Bold labels for specific checkboxes */
         #chk_denoise label,
         #chk_denoise span,
@@ -391,6 +406,9 @@ def create_demo_interface(client: RayServeVoxCPMClient):
         """
     ) as interface:
         gr.HTML('<div class="logo-container"><img src="/gradio_api/file=assets/voxcpm-logo.png" alt="VoxCPM Logo"></div>')
+        
+        # Service Overload Notice
+        gr.HTML('<div class="overload-notice"><span class="icon">⚠️</span>Our service is currently overloaded and under maintenance. Please expect delays or try again later.</div>')
 
         # Quick Start
         with gr.Accordion("📋 Quick Start Guide | 快速入门", open=False):
