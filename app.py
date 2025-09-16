@@ -499,7 +499,7 @@ def create_demo_interface(client: RayServeVoxCPMClient):
             outputs=[audio_output],
             show_progress=True,
             api_name="generate",
-            concurrency_limit=None,
+            concurrency_limit=5,
         )
         prompt_wav.change(fn=client.prompt_wav_recognition, inputs=[prompt_wav], outputs=[prompt_text])
         
