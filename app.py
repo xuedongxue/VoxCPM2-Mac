@@ -51,7 +51,7 @@ class RayServeVoxCPMClient:
         
         try:
             # Ray Serve API URL (can be overridden via env)
-            self.RAY_SERVE_DEFAULT_URL = "https://d09170151-pytorch251-cuda124-u-5512-5ujwyr42-8970.550c.cloud"
+            self.RAY_SERVE_DEFAULT_URL = "https://d09181730-pytorch251-cuda124-u-5512-fi9jdi9p-8970.550c.cloud"
             self.api_url = self._resolve_server_url()
             logger.info(f"🔗 准备连接到Ray Serve API: {self.api_url}")
             
