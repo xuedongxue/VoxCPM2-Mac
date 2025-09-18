@@ -24,6 +24,13 @@ logging.basicConfig(
         logging.FileHandler('app.log', mode='a', encoding='utf-8')
     ]
 )
+
+# 控制第三方库的日志级别，避免HTTP请求日志刷屏
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+logging.getLogger("uvicorn").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
 # 启动日志
@@ -138,15 +145,11 @@ class RayServeVoxCPMClient:
         
         try:
             start_time = time.time()
-            logger.info(f"📁 处理音频文件: {prompt_wav}")
             
             # 将音频文件转换为base64
             convert_start = time.time()
             audio_base64 = self._audio_file_to_base64(prompt_wav)
             convert_time = time.time() - convert_start
-            logger.info(f"🔄 音频转base64耗时: {convert_time:.3f}秒")
-            
-            logger.info("📡 调用Ray Serve ASR API...")
             
             # 构建ASR请求 - 匹配 voxcpm_api.py 格式
             asr_request = {
@@ -173,8 +176,6 @@ class RayServeVoxCPMClient:
             logger.info(f"⏱️  ASR API请求耗时: {api_time:.3f}秒")
             logger.info(f"⏱️  ASR总耗时: {total_time:.3f}秒")
             logger.info(f"🔍 完整的ASR响应: {result_data}")
-            logger.info(f"📊 ASR响应类型: {type(result_data)}")
-            logger.info(f"📊 ASR响应字段: {list(result_data.keys()) if isinstance(result_data, dict) else 'N/A'}")
             
             # 检查响应状态 - 基于实际响应格式，ASR有多种成功标识
             if isinstance(result_data, dict) and "text" in result_data and (
@@ -185,7 +186,6 @@ class RayServeVoxCPMClient:
                 return recognized_text
             else:
                 logger.warning(f"⚠️  ASR响应验证失败:")
-                logger.warning(f"   - 是否为字典: {isinstance(result_data, dict)}")
                 if isinstance(result_data, dict):
                     logger.warning(f"   - code字段: {result_data.get('code')}")
                     logger.warning(f"   - 是否有text字段: {'text' in result_data}")
@@ -210,9 +210,7 @@ class RayServeVoxCPMClient:
     ) -> Tuple[int, np.ndarray]:
         """
         Call Ray Serve /generate API and return (sample_rate, waveform).
-        """
-        logger.info(f"🔥 调用Ray Serve生成API，文本: '{text[:60]}...'")
-        
+        """        
         try:
             start_time = time.time()
             
@@ -233,7 +231,6 @@ class RayServeVoxCPMClient:
                 convert_start = time.time()
                 audio_base64 = self._audio_file_to_base64(prompt_wav_path)
                 convert_time = time.time() - convert_start
-                logger.info(f"🔄 参考音频转base64耗时: {convert_time:.3f}秒")
                 
                 request_data.update({
                     "prompt_wav": audio_base64,
@@ -242,10 +239,6 @@ class RayServeVoxCPMClient:
             else:
                 logger.info("🎤 使用默认语音模式")
             prepare_time = time.time() - prepare_start
-            logger.info(f"⏱️  请求数据准备耗时: {prepare_time:.3f}秒")
-            
-            logger.info(f"📡 发送请求到Ray Serve: {self.api_url}/generate")
-            logger.info(f"📊 请求参数: CFG={cfg_value}, 推理步数={inference_timesteps}, 文本长度={len(text)}")
             
             # 调用生成接口
             api_start = time.time()
@@ -259,16 +252,11 @@ class RayServeVoxCPMClient:
             api_time = time.time() - api_start
             
             result_data = response.json()
-            logger.info(f"⏱️  TTS API请求耗时: {api_time:.3f}秒")
-            logger.info(f"🔍 完整的Ray Serve响应: {result_data}")
-            logger.info(f"📊 响应类型: {type(result_data)}")
-            logger.info(f"📊 响应字段: {list(result_data.keys()) if isinstance(result_data, dict) else 'N/A'}")
             
             # 检查响应状态 - 基于实际响应格式，TTS响应没有code字段，只检查data
             if isinstance(result_data, dict) and "data" in result_data and isinstance(result_data["data"], str) and result_data["data"]:
                 # 成功生成音频
                 audio_base64 = result_data["data"]
-                logger.info(f"✅ 找到音频数据，base64长度: {len(audio_base64)}")
                 
                 # 将base64音频转换为numpy数组
                 decode_start = time.time()
@@ -276,10 +264,6 @@ class RayServeVoxCPMClient:
                 decode_time = time.time() - decode_start
                 total_time = time.time() - start_time
                 
-                duration_ms = result_data.get('addition', {}).get('duration', 'unknown')
-                logger.info(f"🔄 音频解码耗时: {decode_time:.3f}秒")
-                logger.info(f"⏱️  TTS总耗时: {total_time:.3f}秒")
-                logger.info(f"🎵 音频生成成功，采样率: {sample_rate}, 时长: {duration_ms}ms")
                 logger.info(f"📈 性能指标: API={api_time:.3f}s, 解码={decode_time:.3f}s, 总计={total_time:.3f}s")
                 
                 return sample_rate, audio_array
@@ -315,14 +299,12 @@ class RayServeVoxCPMClient:
         denoise: bool = True,
     ) -> Tuple[int, np.ndarray]:
         logger.info("🎤 开始TTS音频生成...")
-        logger.info(f"📝 输入文本: '{text_input[:60]}{'...' if len(text_input) > 60 else ''}'")
-        logger.info(f"🎵 参考音频: {prompt_wav_path_input or '无'}")
-        logger.info(f"📄 参考文本: '{prompt_text_input[:30]}{'...' if prompt_text_input and len(prompt_text_input) > 30 else ''}' " if prompt_text_input else "无")
+        logger.info(f"📝 输入文本: '{text_input}'")
+        logger.info(f"📄 参考文本: '{prompt_text_input}' " if prompt_text_input else "无")
         logger.info(f"⚙️  CFG值: {cfg_value_input}, 推理步数: {inference_timesteps_input}")
-        logger.info(f"🔧 文本正规化: {do_normalize}, 音频降噪: {denoise}")
+        logger.info(f"🔧 文本正则: {do_normalize}, 音频降噪: {denoise}")
         
         try:
-            full_start_time = time.time()
             
             text = (text_input or "").strip()
             if len(text) == 0:
@@ -334,8 +316,6 @@ class RayServeVoxCPMClient:
             cfg_value = cfg_value_input if cfg_value_input is not None else 2.0
             inference_timesteps = inference_timesteps_input if inference_timesteps_input is not None else 10
             
-            logger.info("🚀 调用Ray Serve TTS生成引擎...")
-            generate_start = time.time()
             sr, wav_np = self._call_ray_serve_generate(
                 text=text,
                 prompt_wav_path=prompt_wav_path,
@@ -345,11 +325,7 @@ class RayServeVoxCPMClient:
                 do_normalize=do_normalize,
                 denoise=denoise,
             )
-            generate_time = time.time() - generate_start
-            full_time = time.time() - full_start_time
             
-            logger.info(f"✅ TTS生成完成，采样率: {sr}, 音频长度: {len(wav_np) if hasattr(wav_np, '__len__') else 'unknown'}")
-            logger.info(f"🏁 完整TTS流程耗时: {full_time:.3f}秒 (生成={generate_time:.3f}s)")
             return (sr, wav_np)
             
         except Exception as e:
@@ -403,7 +379,7 @@ def create_demo_interface(client: RayServeVoxCPMClient):
         gr.HTML('<div class="logo-container"><img src="/gradio_api/file=assets/voxcpm-logo.png" alt="VoxCPM Logo"></div>')
 
         # Quick Start
-        with gr.Accordion("📋 Quick Start Guide | 快速入门", open=False):
+        with gr.Accordion("📋 Quick Start Guide ｜快速入门", open=False, elem_id="acc_quick"):
             gr.Markdown("""
             ### How to Use ｜使用说明
             1. **(Optional) Provide a Voice Prompt** - Upload or record an audio clip to provide the desired voice characteristics for synthesis.  
@@ -417,7 +393,7 @@ def create_demo_interface(client: RayServeVoxCPMClient):
             """)
 
         # Pro Tips
-        with gr.Accordion("💡 Pro Tips ｜使用建议", open=False):
+        with gr.Accordion("💡 Pro Tips ｜使用建议", open=False, elem_id="acc_tips"):
             gr.Markdown("""
             ### Prompt Speech Enhancement｜参考语音降噪
             - **Enable** to remove background noise for a clean, studio-like voice, with an external ZipEnhancer component.  
@@ -442,19 +418,16 @@ def create_demo_interface(client: RayServeVoxCPMClient):
               **调低**：合成速度更快。
             - **Higher** for better synthesis quality.  
               **调高**：合成质量更佳。
-
-            ### Long Text (e.g., >5 min speech)｜长文本 (如 >5分钟的合成语音)
-            While VoxCPM can handle long texts directly, we recommend using empty lines to break very long content into paragraphs; the model will then synthesize each paragraph individually.  
-            虽然 VoxCPM 支持直接生成长文本，但如果目标文本过长，我们建议使用换行符将内容分段；模型将对每个段落分别合成。
             """)
 
+        # Main controls
         with gr.Row():
             with gr.Column():
                 prompt_wav = gr.Audio(
                     sources=["upload", 'microphone'],
                     type="filepath",
-                    label="Prompt Speech",
-                    value="examples/example.wav"
+                    label="Prompt Speech (Optional, or let VoxCPM improvise)",
+                    value="./examples/example.wav",
                 )
                 DoDenoisePromptAudio = gr.Checkbox(
                     value=False,
@@ -489,16 +462,15 @@ def create_demo_interface(client: RayServeVoxCPMClient):
                 )
                 with gr.Row():
                     text = gr.Textbox(
-                        value="VoxCPM is an innovative end-to-end TTS model from ModelBest, designed to generate highly expressive speech.",
+                        value="VoxCPM is an innovative end-to-end TTS model from ModelBest, designed to generate highly realistic speech.",
                         label="Target Text",
-                        info="Default processing splits text on \\n into paragraphs; each is synthesized as a chunk and then concatenated into the final audio."
                     )
                 with gr.Row():
                     DoNormalizeText = gr.Checkbox(
                         value=False,
                         label="Text Normalization",
                         elem_id="chk_normalize",
-                        info="We use WeTextPorcessing library to normalize the input text."
+                        info="We use wetext library to normalize the input text."
                     )
                 audio_output = gr.Audio(label="Output Audio")
 
