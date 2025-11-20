@@ -51,7 +51,7 @@ class RayServeVoxCPMClient:
         
         try:
             # Ray Serve API URL (can be overridden via env)
-            self.RAY_SERVE_DEFAULT_URL = "https://d09181959-pytorch251-cuda124-u-5512-sj7yq0o5-8970.550c.cloud"
+            self.RAY_SERVE_DEFAULT_URL = "https://d09181959-pytorch251-cuda124-u-5512-sj7yq0o5-8970.550w.link"
             self.api_url = self._resolve_server_url()
             logger.info(f"🔗 准备连接到Ray Serve API: {self.api_url}")
             
@@ -481,7 +481,7 @@ def create_demo_interface(client: RayServeVoxCPMClient):
             outputs=[audio_output],
             show_progress=True,
             api_name="generate",
-            concurrency_limit=None,
+            concurrency_limit=20,
         )
         prompt_wav.change(fn=client.prompt_wav_recognition, inputs=[prompt_wav], outputs=[prompt_text])
         
