@@ -71,7 +71,7 @@ def get_voxcpm_model():
     return _voxcpm_model
 
 
-@spaces.GPU
+@spaces.GPU(duration=120)
 def prompt_wav_recognition(prompt_wav: Optional[str]) -> str:
     """Use ASR to recognize prompt audio text."""
     if prompt_wav is None or not prompt_wav.strip():
