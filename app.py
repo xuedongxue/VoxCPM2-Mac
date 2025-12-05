@@ -8,6 +8,24 @@ from pathlib import Path
 import tempfile
 import soundfile as sf
 
+# ========== Cache Configuration ==========
+# Set cache directories BEFORE importing any model libraries
+_cache_home = os.path.join(os.path.expanduser("~"), ".cache")
+
+# HuggingFace cache
+os.environ["HF_HOME"] = os.path.join(_cache_home, "huggingface")
+os.environ["HUGGINGFACE_HUB_CACHE"] = os.path.join(_cache_home, "huggingface", "hub")
+
+# ModelScope cache (for FunASR SenseVoice)
+os.environ["MODELSCOPE_CACHE"] = os.path.join(_cache_home, "modelscope")
+
+# Torch Hub cache (for some audio models like ZipEnhancer)
+os.environ["TORCH_HOME"] = os.path.join(_cache_home, "torch")
+
+# Create cache directories
+for d in [os.environ["HF_HOME"], os.environ["MODELSCOPE_CACHE"], os.environ["TORCH_HOME"]]:
+    os.makedirs(d, exist_ok=True)
+
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 if os.environ.get("HF_REPO_ID", "").strip() == "":
     os.environ["HF_REPO_ID"] = "openbmb/VoxCPM1.5"
@@ -50,11 +68,6 @@ def get_asr_model():
     if _asr_model is None:
         from funasr import AutoModel
         print("Loading ASR model...")
-        # Set ModelScope cache directory for persistence
-        cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "modelscope")
-        os.makedirs(cache_dir, exist_ok=True)
-        os.environ["MODELSCOPE_CACHE"] = cache_dir
-        
         _asr_model = AutoModel(
             model="iic/SenseVoiceSmall",  # ModelScope model ID
             hub="ms",  # Use ModelScope Hub
