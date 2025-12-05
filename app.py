@@ -39,39 +39,39 @@ logger.info("🚀 VoxCPM应用启动中...")
 logger.info(f"Python版本: {sys.version}")
 logger.info(f"工作目录: {os.getcwd()}")
 logger.info(f"环境变量PORT: {os.environ.get('PORT', '未设置')}")
-logger.info(f"环境变量RAY_SERVE_URL: {os.environ.get('RAY_SERVE_URL', '未设置')}")
+logger.info(f"环境变量VOXCPM_API_URL: {os.environ.get('VOXCPM_API_URL', '未设置')}")
 logger.info("="*50)
 
 
-class RayServeVoxCPMClient:
-    """Client wrapper that talks to Ray Serve TTS API."""
+class VoxCPMClient:
+    """Client wrapper that talks to VoxCPM FastAPI server."""
 
     def __init__(self) -> None:
-        logger.info("📡 初始化RayServeVoxCPMClient...")
+        logger.info("📡 初始化VoxCPMClient...")
         
         try:
-            # Ray Serve API URL (can be overridden via env)
-            self.RAY_SERVE_DEFAULT_URL = "https://d09181959-pytorch251-cuda124-u-5512-sj7yq0o5-8970.550w.link"
+            # VoxCPM API URL (can be overridden via env)
+            self.DEFAULT_API_URL = "https://deployment-5512-xjbzp8ey-7860.550w.link"
             self.api_url = self._resolve_server_url()
-            logger.info(f"🔗 准备连接到Ray Serve API: {self.api_url}")
+            logger.info(f"🔗 准备连接到VoxCPM API: {self.api_url}")
             
             # Test connection
-            logger.info("⏳ 测试Ray Serve连接...")
+            logger.info("⏳ 测试API连接...")
             health_start = time.time()
             health_response = requests.get(f"{self.api_url}/health", timeout=10)
             health_response.raise_for_status()
             health_time = time.time() - health_start
-            logger.info(f"✅ 成功连接到Ray Serve API: {self.api_url} (耗时: {health_time:.3f}秒)")
+            logger.info(f"✅ 成功连接到VoxCPM API: {self.api_url} (耗时: {health_time:.3f}秒)")
             
         except Exception as e:
-            logger.error(f"❌ 初始化RayServeVoxCPMClient失败: {e}")
+            logger.error(f"❌ 初始化VoxCPMClient失败: {e}")
             logger.error(f"错误详情: {traceback.format_exc()}")
             raise
 
     # ----------- Helpers -----------
     def _resolve_server_url(self) -> str:
-        """Resolve Ray Serve API base URL, prefer env RAY_SERVE_URL."""
-        return os.environ.get("RAY_SERVE_URL", self.RAY_SERVE_DEFAULT_URL).rstrip("/")
+        """Resolve VoxCPM API base URL, prefer env VOXCPM_API_URL."""
+        return os.environ.get("VOXCPM_API_URL", self.DEFAULT_API_URL).rstrip("/")
 
     def _audio_file_to_base64(self, audio_file_path: str) -> str:
         """
@@ -136,7 +136,7 @@ class RayServeVoxCPMClient:
     
     # ----------- Functional endpoints -----------
     def prompt_wav_recognition(self, prompt_wav: Optional[str]) -> str:
-        """Use Ray Serve ASR API for speech recognition."""
+        """Use VoxCPM ASR API for speech recognition."""
         logger.info(f"🎵 开始语音识别，输入文件: {prompt_wav}")
         
         if prompt_wav is None or not prompt_wav.strip():
@@ -151,12 +151,9 @@ class RayServeVoxCPMClient:
             audio_base64 = self._audio_file_to_base64(prompt_wav)
             convert_time = time.time() - convert_start
             
-            # 构建ASR请求 - 匹配 voxcpm_api.py 格式
+            # 构建ASR请求 - 匹配 advanced_api 格式
             asr_request = {
-                "audio_data": audio_base64,
-                "language": "auto",
-                "use_itn": True,
-                "reqid": str(uuid.uuid4())
+                "wav_base64": audio_base64
             }
             
             # 调用ASR接口
@@ -177,19 +174,15 @@ class RayServeVoxCPMClient:
             logger.info(f"⏱️  ASR总耗时: {total_time:.3f}秒")
             logger.info(f"🔍 完整的ASR响应: {result_data}")
             
-            # 检查响应状态 - 基于实际响应格式，ASR有多种成功标识
-            if isinstance(result_data, dict) and "text" in result_data and (
-                result_data.get("code") == 3000 or result_data.get("status") == "ok"
-            ):
+            # 检查响应状态 - advanced_api 格式返回 {"text": "识别文本"}
+            if isinstance(result_data, dict) and "text" in result_data:
                 recognized_text = result_data.get("text", "")
                 logger.info(f"🎯 识别结果: '{recognized_text}'")
                 return recognized_text
             else:
                 logger.warning(f"⚠️  ASR响应验证失败:")
                 if isinstance(result_data, dict):
-                    logger.warning(f"   - code字段: {result_data.get('code')}")
                     logger.warning(f"   - 是否有text字段: {'text' in result_data}")
-                    logger.warning(f"   - message字段: {result_data.get('message')}")
                 logger.warning(f"⚠️  完整ASR响应: {result_data}")
                 return ""
                 
@@ -198,7 +191,7 @@ class RayServeVoxCPMClient:
             logger.error(f"错误详情: {traceback.format_exc()}")
             return ""
 
-    def _call_ray_serve_generate(
+    def _call_api_generate(
         self,
         text: str,
         prompt_wav_path: Optional[str] = None,
@@ -209,83 +202,157 @@ class RayServeVoxCPMClient:
         denoise: bool = True,
     ) -> Tuple[int, np.ndarray]:
         """
-        Call Ray Serve /generate API and return (sample_rate, waveform).
+        Call VoxCPM API and return (sample_rate, waveform).
+        根据是否有 prompt audio 调用不同接口：
+        - 有 prompt: /generate_with_prompt（不注册，避免内存问题）
+        - 无 prompt: /generate_playground（使用默认音色）
         """        
         try:
             start_time = time.time()
             
-            # 构建请求数据 - 匹配 voxcpm_api.py 格式
-            prepare_start = time.time()
-            request_data = {
-                "text": text,
-                "cfg_value": cfg_value,
-                "inference_timesteps": inference_timesteps,
-                "do_normalize": do_normalize,
-                "denoise": denoise,
-                "reqid": str(uuid.uuid4())
-            }
-            
-            # 如果有参考音频和文本，添加到请求中
-            if prompt_wav_path and prompt_text:
-                logger.info("🎭 使用语音克隆模式")
+            # 根据是否有参考音频选择不同的接口
+            if prompt_wav_path and os.path.exists(prompt_wav_path):
+                # ========== 有 prompt: 使用 /generate_with_prompt ==========
+                logger.info("🎭 使用语音克隆模式 - 调用 /generate_with_prompt")
+                
+                # 转换音频为 base64
                 convert_start = time.time()
                 audio_base64 = self._audio_file_to_base64(prompt_wav_path)
                 convert_time = time.time() - convert_start
+                logger.info(f"⏱️  音频转换耗时: {convert_time:.3f}秒")
                 
-                request_data.update({
-                    "prompt_wav": audio_base64,
-                    "prompt_text": prompt_text
-                })
+                # 使用纯 JSON 请求（方式A），通过 wav_base64 传递音频
+                request_data = {
+                    "target_text": text,
+                    "wav_base64": audio_base64,
+                    "prompt_text": prompt_text or "",
+                    "denoise": denoise,
+                    "register": False,  # 不持久化，避免内存问题
+                    "audio_format": "wav",
+                    "max_generate_length": 2000,
+                    "temperature": 1.0,
+                    "cfg_value": cfg_value,
+                    "stream": False
+                }
+                
+                api_endpoint = f"{self.api_url}/generate_with_prompt"
+                
+                api_start = time.time()
+                logger.info(f"📤 请求接口: {api_endpoint}")
+                response = requests.post(
+                    api_endpoint,
+                    json=request_data,
+                    timeout=120
+                )
+                api_time = time.time() - api_start
+                logger.info(f"⏱️  API请求耗时: {api_time:.3f}秒")
+                
+                # 打印详细错误信息
+                if response.status_code != 200:
+                    logger.error(f"❌ API返回状态码: {response.status_code}")
+                    logger.error(f"❌ API返回内容: {response.text}")
+                response.raise_for_status()
+                
+                # /generate_with_prompt 返回 WAV 文件
+                content_type = response.headers.get("Content-Type", "")
+                if "audio/wav" in content_type:
+                    logger.info("📥 收到 WAV 音频响应")
+                    audio_bytes = response.content
+                    
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp_file:
+                        tmp_file.write(audio_bytes)
+                        tmp_file_path = tmp_file.name
+                    
+                    try:
+                        audio_data, sr = sf.read(tmp_file_path, dtype='float32')
+                        if audio_data.ndim == 2:
+                            audio_data = audio_data[:, 0]
+                        audio_int16 = (audio_data * 32767).astype(np.int16)
+                        
+                        total_time = time.time() - start_time
+                        logger.info(f"📈 性能指标: API={api_time:.3f}s, 总计={total_time:.3f}s")
+                        
+                        return sr, audio_int16
+                    finally:
+                        try:
+                            os.unlink(tmp_file_path)
+                        except:
+                            pass
+                else:
+                    # 可能返回 JSON 错误
+                    result_data = response.json()
+                    raise RuntimeError(f"API错误: {result_data}")
+                    
             else:
-                logger.info("🎤 使用默认语音模式")
-            prepare_time = time.time() - prepare_start
-            
-            # 调用生成接口
-            api_start = time.time()
-            response = requests.post(
-                f"{self.api_url}/generate",
-                json=request_data,
-                headers={"Content-Type": "application/json"},
-                timeout=120  # TTS可能需要较长时间
-            )
-            response.raise_for_status()
-            api_time = time.time() - api_start
-            
-            result_data = response.json()
-            
-            # 检查响应状态 - 基于实际响应格式，TTS响应没有code字段，只检查data
-            if isinstance(result_data, dict) and "data" in result_data and isinstance(result_data["data"], str) and result_data["data"]:
-                # 成功生成音频
-                audio_base64 = result_data["data"]
+                # ========== 无 prompt: 使用 /generate_playground ==========
+                logger.info("🎤 使用默认语音模式 - 调用 /generate_playground")
+                reqid = str(uuid.uuid4())
                 
-                # 将base64音频转换为numpy数组
-                decode_start = time.time()
-                sample_rate, audio_array = self._base64_to_audio_array(audio_base64)
-                decode_time = time.time() - decode_start
-                total_time = time.time() - start_time
+                # 构建嵌套结构请求
+                request_data = {
+                    "audio": {
+                        "voice_type": "default",  # 使用默认音色
+                        "encoding": "wav",
+                        "speed_ratio": 1.0,
+                        "prompt_wav": None,
+                        "prompt_wav_url": None,
+                        "prompt_text": "",
+                        "cfg_value": cfg_value,
+                        "inference_timesteps": inference_timesteps
+                    },
+                    "request": {
+                        "reqid": reqid,
+                        "text": text,
+                        "operation": "query",
+                        "do_normalize": do_normalize,
+                        "denoise": denoise
+                    }
+                }
                 
-                logger.info(f"📈 性能指标: API={api_time:.3f}s, 解码={decode_time:.3f}s, 总计={total_time:.3f}s")
+                api_endpoint = f"{self.api_url}/generate_playground"
                 
-                return sample_rate, audio_array
-            else:
-                logger.error(f"❌ 响应验证失败:")
-                logger.error(f"   - 是否为字典: {isinstance(result_data, dict)}")
-                if isinstance(result_data, dict):
-                    logger.error(f"   - 是否有data字段: {'data' in result_data}")
-                    if "data" in result_data:
-                        logger.error(f"   - data字段类型: {type(result_data['data'])}")
-                        logger.error(f"   - data字段是否为字符串: {isinstance(result_data['data'], str)}")
-                        if isinstance(result_data['data'], str):
-                            logger.error(f"   - data字段是否非空: {bool(result_data['data'])}")
-                            logger.error(f"   - data字段长度: {len(result_data['data'])}")
-                logger.error(f"❌ 完整响应内容: {result_data}")
-                raise RuntimeError(f"Ray Serve没有返回有效的音频数据。响应: {result_data}")
+                # 调用接口
+                api_start = time.time()
+                logger.info(f"📤 请求接口: {api_endpoint}")
+                response = requests.post(
+                    api_endpoint,
+                    json=request_data,
+                    headers={"Content-Type": "application/json"},
+                    timeout=120
+                )
+                response.raise_for_status()
+                api_time = time.time() - api_start
+                logger.info(f"⏱️  API请求耗时: {api_time:.3f}秒")
+                
+                # /generate_playground 返回 JSON
+                result_data = response.json()
+                logger.info(f"📥 收到响应: code={result_data.get('code')}, message={result_data.get('message')}")
+                
+                if isinstance(result_data, dict) and result_data.get("code") == 3000:
+                    audio_base64 = result_data.get("data", "")
+                    if audio_base64:
+                        decode_start = time.time()
+                        sample_rate, audio_array = self._base64_to_audio_array(audio_base64)
+                        decode_time = time.time() - decode_start
+                        total_time = time.time() - start_time
+                        
+                        duration = result_data.get("addition", {}).get("duration", "0")
+                        logger.info(f"📈 性能指标: API={api_time:.3f}s, 解码={decode_time:.3f}s, 总计={total_time:.3f}s, 音频时长={duration}ms")
+                        
+                        return sample_rate, audio_array
+                    else:
+                        raise RuntimeError(f"API返回空音频数据。响应: {result_data}")
+                else:
+                    error_code = result_data.get("code", "unknown")
+                    error_msg = result_data.get("message", "unknown error")
+                    logger.error(f"❌ API返回错误: code={error_code}, message={error_msg}")
+                    raise RuntimeError(f"API错误 [{error_code}]: {error_msg}")
                 
         except requests.exceptions.RequestException as e:
-            logger.error(f"❌ Ray Serve请求失败: {e}")
-            raise RuntimeError(f"Failed to connect Ray Serve TTS service: {e}. Check RAY_SERVE_URL='{self.api_url}' and service status")
+            logger.error(f"❌ API请求失败: {e}")
+            raise RuntimeError(f"Failed to connect TTS service: {e}. Check VOXCPM_API_URL='{self.api_url}' and service status")
         except Exception as e:
-            logger.error(f"❌ Ray Serve调用异常: {e}")
+            logger.error(f"❌ API调用异常: {e}")
             raise
 
     def generate_tts_audio(
@@ -316,7 +383,7 @@ class RayServeVoxCPMClient:
             cfg_value = cfg_value_input if cfg_value_input is not None else 2.0
             inference_timesteps = inference_timesteps_input if inference_timesteps_input is not None else 10
             
-            sr, wav_np = self._call_ray_serve_generate(
+            sr, wav_np = self._call_api_generate(
                 text=text,
                 prompt_wav_path=prompt_wav_path,
                 prompt_text=prompt_text,
@@ -336,7 +403,7 @@ class RayServeVoxCPMClient:
 
 # ---------- UI Builders ----------
 
-def create_demo_interface(client: RayServeVoxCPMClient):
+def create_demo_interface(client: VoxCPMClient):
     """Build the Gradio UI for Gradio API VoxCPM client."""
     logger.info("🎨 开始创建Gradio界面...")
     
@@ -377,6 +444,9 @@ def create_demo_interface(client: RayServeVoxCPMClient):
         """
     ) as interface:
         gr.HTML('<div class="logo-container"><img src="/gradio_api/file=assets/voxcpm-logo.png" alt="VoxCPM Logo"></div>')
+        
+        # Update notice
+        gr.Markdown("📢 **12/05: We upgraded the inference model to VoxCPM-1.5.**")
 
         # Quick Start
         with gr.Accordion("📋 Quick Start Guide ｜快速入门", open=False, elem_id="acc_quick"):
@@ -497,9 +567,9 @@ def run_demo():
     
     try:
         # 创建客户端
-        logger.info("📡 创建Ray Serve API客户端...")
-        client = RayServeVoxCPMClient()
-        logger.info("✅ Ray Serve API客户端创建成功")
+        logger.info("📡 创建VoxCPM API客户端...")
+        client = VoxCPMClient()
+        logger.info("✅ VoxCPM API客户端创建成功")
         
         # 创建界面
         logger.info("🎨 创建Gradio界面...")
