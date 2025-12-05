@@ -50,8 +50,14 @@ def get_asr_model():
     if _asr_model is None:
         from funasr import AutoModel
         print("Loading ASR model...")
+        # Set ModelScope cache directory for persistence
+        cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "modelscope")
+        os.makedirs(cache_dir, exist_ok=True)
+        os.environ["MODELSCOPE_CACHE"] = cache_dir
+        
         _asr_model = AutoModel(
-            model="iic/SenseVoiceSmall",
+            model="iic/SenseVoiceSmall",  # ModelScope model ID
+            hub="ms",  # Use ModelScope Hub
             disable_update=True,
             log_level='INFO',
             device="cuda:0",
