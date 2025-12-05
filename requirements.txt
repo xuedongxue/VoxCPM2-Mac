@@ -3,3 +3,4 @@ gradio>=4.0.0
 requests>=2.25.0
 numpy>=1.21.0
 soundfile>=0.12.1
+voxcpm>=1.5.0
