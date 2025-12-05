@@ -179,7 +179,7 @@ def get_voxcpm_model():
         
         _voxcpm_model = voxcpm.VoxCPM(
             voxcpm_model_path=model_dir, 
-            optimize=False,
+            optimize=True,
             enable_denoiser=True,
             zipenhancer_model_path=zipenhancer_path,
         )
