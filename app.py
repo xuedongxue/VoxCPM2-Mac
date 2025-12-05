@@ -8,23 +8,31 @@ from pathlib import Path
 import tempfile
 import soundfile as sf
 
-# ========== Cache Configuration ==========
-# Set cache directories BEFORE importing any model libraries
-_cache_home = os.path.join(os.path.expanduser("~"), ".cache")
 
-# HuggingFace cache
-os.environ["HF_HOME"] = os.path.join(_cache_home, "huggingface")
-os.environ["HUGGINGFACE_HUB_CACHE"] = os.path.join(_cache_home, "huggingface", "hub")
+def setup_cache_env():
+    """
+    Setup cache environment variables.
+    Must be called in GPU worker context as well.
+    """
+    _cache_home = os.path.join(os.path.expanduser("~"), ".cache")
+    
+    # HuggingFace cache
+    os.environ["HF_HOME"] = os.path.join(_cache_home, "huggingface")
+    os.environ["HUGGINGFACE_HUB_CACHE"] = os.path.join(_cache_home, "huggingface", "hub")
+    
+    # ModelScope cache (for FunASR SenseVoice)
+    os.environ["MODELSCOPE_CACHE"] = os.path.join(_cache_home, "modelscope")
+    
+    # Torch Hub cache (for some audio models like ZipEnhancer)
+    os.environ["TORCH_HOME"] = os.path.join(_cache_home, "torch")
+    
+    # Create cache directories
+    for d in [os.environ["HF_HOME"], os.environ["MODELSCOPE_CACHE"], os.environ["TORCH_HOME"]]:
+        os.makedirs(d, exist_ok=True)
 
-# ModelScope cache (for FunASR SenseVoice)
-os.environ["MODELSCOPE_CACHE"] = os.path.join(_cache_home, "modelscope")
 
-# Torch Hub cache (for some audio models like ZipEnhancer)
-os.environ["TORCH_HOME"] = os.path.join(_cache_home, "torch")
-
-# Create cache directories
-for d in [os.environ["HF_HOME"], os.environ["MODELSCOPE_CACHE"], os.environ["TORCH_HOME"]]:
-    os.makedirs(d, exist_ok=True)
+# Setup cache in main process BEFORE any imports
+setup_cache_env()
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 if os.environ.get("HF_REPO_ID", "").strip() == "":
@@ -34,6 +42,56 @@ if os.environ.get("HF_REPO_ID", "").strip() == "":
 _asr_model = None
 _voxcpm_model = None
 _default_local_model_dir = "./models/VoxCPM1.5"
+_zipenhancer_local_path = None  # Will be set after pre-download
+
+
+def predownload_models():
+    """
+    Pre-download models at startup (runs in main process, not GPU worker).
+    This ensures models are cached before GPU functions are called.
+    """
+    global _zipenhancer_local_path
+    
+    print("=" * 50)
+    print("Pre-downloading models to cache...")
+    print(f"MODELSCOPE_CACHE={os.environ.get('MODELSCOPE_CACHE')}")
+    print(f"HF_HOME={os.environ.get('HF_HOME')}")
+    print("=" * 50)
+    
+    # Pre-download ZipEnhancer from ModelScope
+    try:
+        from modelscope.hub.snapshot_download import snapshot_download as ms_snapshot_download
+        zipenhancer_model_id = "iic/speech_zipenhancer_ans_multiloss_16k_base"
+        print(f"Pre-downloading ZipEnhancer: {zipenhancer_model_id}")
+        _zipenhancer_local_path = ms_snapshot_download(
+            zipenhancer_model_id,
+            cache_dir=os.environ.get("MODELSCOPE_CACHE"),
+        )
+        print(f"ZipEnhancer downloaded to: {_zipenhancer_local_path}")
+    except Exception as e:
+        print(f"Warning: Failed to pre-download ZipEnhancer: {e}")
+        _zipenhancer_local_path = None
+    
+    # Pre-download ASR model (SenseVoice) from ModelScope
+    try:
+        from modelscope.hub.snapshot_download import snapshot_download as ms_snapshot_download
+        asr_model_id = "iic/SenseVoiceSmall"
+        print(f"Pre-downloading ASR model: {asr_model_id}")
+        asr_local_path = ms_snapshot_download(
+            asr_model_id,
+            cache_dir=os.environ.get("MODELSCOPE_CACHE"),
+        )
+        print(f"ASR model downloaded to: {asr_local_path}")
+    except Exception as e:
+        print(f"Warning: Failed to pre-download ASR model: {e}")
+    
+    print("=" * 50)
+    print("Model pre-download complete!")
+    print("=" * 50)
+
+
+# Run pre-download at startup
+predownload_models()
 
 
 def _resolve_model_dir() -> str:
@@ -66,8 +124,12 @@ def get_asr_model():
     """Lazy load ASR model."""
     global _asr_model
     if _asr_model is None:
+        # Setup cache env in GPU worker context
+        setup_cache_env()
+        
         from funasr import AutoModel
         print("Loading ASR model...")
+        print(f"  MODELSCOPE_CACHE={os.environ.get('MODELSCOPE_CACHE')}")
         _asr_model = AutoModel(
             model="iic/SenseVoiceSmall",  # ModelScope model ID
             hub="ms",  # Use ModelScope Hub
@@ -79,15 +141,48 @@ def get_asr_model():
     return _asr_model
 
 
+def _get_zipenhancer_local_path():
+    """
+    Get ZipEnhancer local path from ModelScope cache.
+    This works in both main process and GPU worker.
+    """
+    setup_cache_env()
+    try:
+        from modelscope.hub.snapshot_download import snapshot_download as ms_snapshot_download
+        zipenhancer_model_id = "iic/speech_zipenhancer_ans_multiloss_16k_base"
+        # This will use cache if already downloaded
+        local_path = ms_snapshot_download(
+            zipenhancer_model_id,
+            cache_dir=os.environ.get("MODELSCOPE_CACHE"),
+        )
+        return local_path
+    except Exception as e:
+        print(f"Warning: Failed to get ZipEnhancer path: {e}")
+        return "iic/speech_zipenhancer_ans_multiloss_16k_base"
+
+
 def get_voxcpm_model():
     """Lazy load VoxCPM model."""
     global _voxcpm_model
     if _voxcpm_model is None:
+        # Setup cache env in GPU worker context
+        setup_cache_env()
+        
         import voxcpm
         print("Loading VoxCPM model...")
         model_dir = _resolve_model_dir()
         print(f"Using model dir: {model_dir}")
-        _voxcpm_model = voxcpm.VoxCPM(voxcpm_model_path=model_dir, optimize=False)
+        
+        # Get ZipEnhancer local path (uses cache if pre-downloaded)
+        zipenhancer_path = _get_zipenhancer_local_path()
+        print(f"ZipEnhancer path: {zipenhancer_path}")
+        
+        _voxcpm_model = voxcpm.VoxCPM(
+            voxcpm_model_path=model_dir, 
+            optimize=False,
+            enable_denoiser=True,
+            zipenhancer_model_path=zipenhancer_path,
+        )
         print("VoxCPM model loaded.")
     return _voxcpm_model
 
