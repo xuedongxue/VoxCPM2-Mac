@@ -5,6 +5,8 @@ import gradio as gr
 import spaces
 from typing import Optional, Tuple
 from pathlib import Path
+import tempfile
+import soundfile as sf
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 if os.environ.get("HF_REPO_ID", "").strip() == "":
@@ -66,7 +68,7 @@ def get_voxcpm_model():
         print("Loading VoxCPM model...")
         model_dir = _resolve_model_dir()
         print(f"Using model dir: {model_dir}")
-        _voxcpm_model = voxcpm.VoxCPM(voxcpm_model_path=model_dir)
+        _voxcpm_model = voxcpm.VoxCPM(voxcpm_model_path=model_dir, optimize=False)
         print("VoxCPM model loaded.")
     return _voxcpm_model
 
@@ -83,6 +85,56 @@ def prompt_wav_recognition(prompt_wav: Optional[str]) -> str:
 
 
 @spaces.GPU(duration=120)
+def generate_tts_audio_gpu(
+    text_input: str,
+    prompt_wav_data: Optional[Tuple[np.ndarray, int]] = None,
+    prompt_text_input: Optional[str] = None,
+    cfg_value_input: float = 2.0,
+    inference_timesteps_input: int = 10,
+    do_normalize: bool = True,
+    denoise: bool = True,
+) -> Tuple[int, np.ndarray]:
+    """
+    GPU function: Generate speech from text using VoxCPM.
+    prompt_wav_data is (audio_array, sample_rate) tuple.
+    """
+    voxcpm_model = get_voxcpm_model()
+
+    text = (text_input or "").strip()
+    if len(text) == 0:
+        raise ValueError("Please input text to synthesize.")
+
+    prompt_text = prompt_text_input if prompt_text_input else None
+    prompt_wav_path = None
+
+    # If prompt audio data provided, write to temp file for voxcpm
+    if prompt_wav_data is not None:
+        audio_array, sr = prompt_wav_data
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            sf.write(f.name, audio_array, sr)
+            prompt_wav_path = f.name
+
+    try:
+        print(f"Generating audio for text: '{text[:60]}...'")
+        wav = voxcpm_model.generate(
+            text=text,
+            prompt_text=prompt_text,
+            prompt_wav_path=prompt_wav_path,
+            cfg_value=float(cfg_value_input),
+            inference_timesteps=int(inference_timesteps_input),
+            normalize=do_normalize,
+            denoise=denoise,
+        )
+        return (voxcpm_model.tts_model.sample_rate, wav)
+    finally:
+        # Cleanup temp file
+        if prompt_wav_path and os.path.exists(prompt_wav_path):
+            try:
+                os.unlink(prompt_wav_path)
+            except Exception:
+                pass
+
+
 def generate_tts_audio(
     text_input: str,
     prompt_wav_path_input: Optional[str] = None,
@@ -93,29 +145,29 @@ def generate_tts_audio(
     denoise: bool = True,
 ) -> Tuple[int, np.ndarray]:
     """
-    Generate speech from text using VoxCPM; optional reference audio for voice style guidance.
-    Returns (sample_rate, waveform_numpy)
+    Wrapper: Read audio file in CPU, then call GPU function.
     """
-    voxcpm_model = get_voxcpm_model()
-
-    text = (text_input or "").strip()
-    if len(text) == 0:
-        raise ValueError("Please input text to synthesize.")
-
-    prompt_wav_path = prompt_wav_path_input if prompt_wav_path_input else None
-    prompt_text = prompt_text_input if prompt_text_input else None
-
-    print(f"Generating audio for text: '{text[:60]}...'")
-    wav = voxcpm_model.generate(
-        text=text,
-        prompt_text=prompt_text,
-        prompt_wav_path=prompt_wav_path,
-        cfg_value=float(cfg_value_input),
-        inference_timesteps=int(inference_timesteps_input),
-        normalize=do_normalize,
+    prompt_wav_data = None
+    
+    # Read audio file before entering GPU context
+    if prompt_wav_path_input and os.path.exists(prompt_wav_path_input):
+        try:
+            audio_array, sr = sf.read(prompt_wav_path_input, dtype='float32')
+            prompt_wav_data = (audio_array, sr)
+            print(f"Loaded prompt audio: {audio_array.shape}, sr={sr}")
+        except Exception as e:
+            print(f"Warning: Failed to load prompt audio: {e}")
+            prompt_wav_data = None
+    
+    return generate_tts_audio_gpu(
+        text_input=text_input,
+        prompt_wav_data=prompt_wav_data,
+        prompt_text_input=prompt_text_input,
+        cfg_value_input=cfg_value_input,
+        inference_timesteps_input=inference_timesteps_input,
+        do_normalize=do_normalize,
         denoise=denoise,
     )
-    return (voxcpm_model.tts_model.sample_rate, wav)
 
 
 # ---------- UI Builders ----------
