@@ -42,7 +42,6 @@ if os.environ.get("HF_REPO_ID", "").strip() == "":
 _asr_model = None
 _voxcpm_model = None
 _default_local_model_dir = "./models/VoxCPM1.5"
-_zipenhancer_local_path = None  # Will be set after pre-download
 
 
 def predownload_models():
@@ -50,36 +49,19 @@ def predownload_models():
     Pre-download models at startup (runs in main process, not GPU worker).
     This ensures models are cached before GPU functions are called.
     """
-    global _zipenhancer_local_path
-    
     print("=" * 50)
     print("Pre-downloading models to cache...")
-    print(f"MODELSCOPE_CACHE={os.environ.get('MODELSCOPE_CACHE')}")
     print(f"HF_HOME={os.environ.get('HF_HOME')}")
     print("=" * 50)
     
-    # Pre-download ZipEnhancer from ModelScope
+    # Pre-download ASR model (SenseVoice) from HuggingFace
     try:
-        from modelscope.hub.snapshot_download import snapshot_download as ms_snapshot_download
-        zipenhancer_model_id = "iic/speech_zipenhancer_ans_multiloss_16k_base"
-        print(f"Pre-downloading ZipEnhancer: {zipenhancer_model_id}")
-        _zipenhancer_local_path = ms_snapshot_download(
-            zipenhancer_model_id,
-            cache_dir=os.environ.get("MODELSCOPE_CACHE"),
-        )
-        print(f"ZipEnhancer downloaded to: {_zipenhancer_local_path}")
-    except Exception as e:
-        print(f"Warning: Failed to pre-download ZipEnhancer: {e}")
-        _zipenhancer_local_path = None
-    
-    # Pre-download ASR model (SenseVoice) from ModelScope
-    try:
-        from modelscope.hub.snapshot_download import snapshot_download as ms_snapshot_download
-        asr_model_id = "iic/SenseVoiceSmall"
+        from huggingface_hub import snapshot_download
+        asr_model_id = "FunAudioLLM/SenseVoiceSmall"
         print(f"Pre-downloading ASR model: {asr_model_id}")
-        asr_local_path = ms_snapshot_download(
+        asr_local_path = snapshot_download(
             asr_model_id,
-            cache_dir=os.environ.get("MODELSCOPE_CACHE"),
+            cache_dir=os.environ.get("HF_HOME"),
         )
         print(f"ASR model downloaded to: {asr_local_path}")
     except Exception as e:
@@ -121,18 +103,17 @@ def _resolve_model_dir() -> str:
 
 
 def get_asr_model():
-    """Lazy load ASR model."""
+    """Lazy load ASR model from HuggingFace."""
     global _asr_model
     if _asr_model is None:
-        # Setup cache env in GPU worker context
         setup_cache_env()
         
         from funasr import AutoModel
         print("Loading ASR model...")
-        print(f"  MODELSCOPE_CACHE={os.environ.get('MODELSCOPE_CACHE')}")
+        print(f"  HF_HOME={os.environ.get('HF_HOME')}")
         _asr_model = AutoModel(
-            model="iic/SenseVoiceSmall",  # ModelScope model ID
-            hub="ms",  # Use ModelScope Hub
+            model="FunAudioLLM/SenseVoiceSmall",  # HuggingFace model ID
+            hub="hf",  # Use HuggingFace Hub
             disable_update=True,
             log_level='INFO',
             device="cuda:0",
@@ -141,31 +122,10 @@ def get_asr_model():
     return _asr_model
 
 
-def _get_zipenhancer_local_path():
-    """
-    Get ZipEnhancer local path from ModelScope cache.
-    This works in both main process and GPU worker.
-    """
-    setup_cache_env()
-    try:
-        from modelscope.hub.snapshot_download import snapshot_download as ms_snapshot_download
-        zipenhancer_model_id = "iic/speech_zipenhancer_ans_multiloss_16k_base"
-        # This will use cache if already downloaded
-        local_path = ms_snapshot_download(
-            zipenhancer_model_id,
-            cache_dir=os.environ.get("MODELSCOPE_CACHE"),
-        )
-        return local_path
-    except Exception as e:
-        print(f"Warning: Failed to get ZipEnhancer path: {e}")
-        return "iic/speech_zipenhancer_ans_multiloss_16k_base"
-
-
 def get_voxcpm_model():
-    """Lazy load VoxCPM model."""
+    """Lazy load VoxCPM model (without denoiser)."""
     global _voxcpm_model
     if _voxcpm_model is None:
-        # Setup cache env in GPU worker context
         setup_cache_env()
         
         import voxcpm
@@ -173,15 +133,10 @@ def get_voxcpm_model():
         model_dir = _resolve_model_dir()
         print(f"Using model dir: {model_dir}")
         
-        # Get ZipEnhancer local path (uses cache if pre-downloaded)
-        zipenhancer_path = _get_zipenhancer_local_path()
-        print(f"ZipEnhancer path: {zipenhancer_path}")
-        
         _voxcpm_model = voxcpm.VoxCPM(
             voxcpm_model_path=model_dir, 
             optimize=True,
-            enable_denoiser=True,
-            zipenhancer_model_path=zipenhancer_path,
+            enable_denoiser=False,  # Disable denoiser to avoid ZipEnhancer download
         )
         print("VoxCPM model loaded.")
     return _voxcpm_model
@@ -206,7 +161,6 @@ def generate_tts_audio_gpu(
     cfg_value_input: float = 2.0,
     inference_timesteps_input: int = 10,
     do_normalize: bool = True,
-    denoise: bool = True,
 ) -> Tuple[int, np.ndarray]:
     """
     GPU function: Generate speech from text using VoxCPM.
@@ -237,7 +191,7 @@ def generate_tts_audio_gpu(
             cfg_value=float(cfg_value_input),
             inference_timesteps=int(inference_timesteps_input),
             normalize=do_normalize,
-            denoise=denoise,
+            denoise=False,  # Denoiser disabled
         )
         return (voxcpm_model.tts_model.sample_rate, wav)
     finally:
@@ -256,7 +210,6 @@ def generate_tts_audio(
     cfg_value_input: float = 2.0,
     inference_timesteps_input: int = 10,
     do_normalize: bool = True,
-    denoise: bool = True,
 ) -> Tuple[int, np.ndarray]:
     """
     Wrapper: Read audio file in CPU, then call GPU function.
@@ -280,7 +233,6 @@ def generate_tts_audio(
         cfg_value_input=cfg_value_input,
         inference_timesteps_input=inference_timesteps_input,
         do_normalize=do_normalize,
-        denoise=denoise,
     )
 
 
@@ -347,12 +299,6 @@ def create_demo_interface():
         # Pro Tips
         with gr.Accordion("💡 Pro Tips ｜使用建议", open=False, elem_id="acc_tips"):
             gr.Markdown("""
-            ### Prompt Speech Enhancement｜参考语音降噪
-            - **Enable** to remove background noise for a clean voice, with an external ZipEnhancer component. However, this will limit the audio sampling rate to 16kHz, restricting the cloning quality ceiling.  
-              **启用**：通过 ZipEnhancer 组件消除背景噪音，但会将音频采样率限制在16kHz，限制克隆上限。
-            - **Disable** to preserve the original audio's all information, including background atmosphere, and support audio cloning up to 44.1kHz sampling rate.  
-              **禁用**：保留原始音频的全部信息，包括背景环境声，最高支持44.1kHz的音频复刻。
-
             ### Text Normalization｜文本正则化
             - **Enable** to process general text with an external WeTextProcessing component.  
               **启用**：使用 WeTextProcessing 组件，可支持常见文本的正则化处理。
@@ -380,12 +326,6 @@ def create_demo_interface():
                     type="filepath",
                     label="Prompt Speech (Optional, or let VoxCPM improvise)",
                     value="./examples/example.wav",
-                )
-                DoDenoisePromptAudio = gr.Checkbox(
-                    value=False,
-                    label="Prompt Speech Enhancement",
-                    elem_id="chk_denoise",
-                    info="We use ZipEnhancer model to denoise the prompt audio."
                 )
                 with gr.Row():
                     prompt_text = gr.Textbox(
@@ -429,7 +369,7 @@ def create_demo_interface():
         # Wiring
         run_btn.click(
             fn=generate_tts_audio,
-            inputs=[text, prompt_wav, prompt_text, cfg_value, inference_timesteps, DoNormalizeText, DoDenoisePromptAudio],
+            inputs=[text, prompt_wav, prompt_text, cfg_value, inference_timesteps, DoNormalizeText],
             outputs=[audio_output],
             show_progress=True,
             api_name="generate",
