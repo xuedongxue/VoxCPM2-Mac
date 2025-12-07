@@ -7,6 +7,7 @@ from typing import Optional, Tuple
 from pathlib import Path
 import tempfile
 import soundfile as sf
+import time
 
 
 def setup_cache_env():
@@ -45,31 +46,54 @@ if os.environ.get("HF_REPO_ID", "").strip() == "":
 # Global model cache for ZeroGPU
 _asr_model = None
 _voxcpm_model = None
-_default_local_model_dir = "./models/VoxCPM1.5"
+
+# Fixed local paths for models (to avoid repeated downloads in GPU workers)
+ASR_LOCAL_DIR = "./models/SenseVoiceSmall"
+VOXCPM_LOCAL_DIR = "./models/VoxCPM1.5"
 
 
 def predownload_models():
     """
     Pre-download models at startup (runs in main process, not GPU worker).
-    This ensures models are cached before GPU functions are called.
+    Download to fixed local directories so GPU workers can reuse them.
     """
     print("=" * 50)
-    print("Pre-downloading models to cache...")
-    print(f"HF_HOME={os.environ.get('HF_HOME')}")
+    print("Pre-downloading models to local directories...")
     print("=" * 50)
     
-    # Pre-download ASR model (SenseVoice) from HuggingFace
-    try:
-        from huggingface_hub import snapshot_download
-        asr_model_id = "FunAudioLLM/SenseVoiceSmall"
-        print(f"Pre-downloading ASR model: {asr_model_id}")
-        asr_local_path = snapshot_download(
-            asr_model_id,
-            cache_dir=os.environ.get("HF_HOME"),
-        )
-        print(f"ASR model downloaded to: {asr_local_path}")
-    except Exception as e:
-        print(f"Warning: Failed to pre-download ASR model: {e}")
+    # Pre-download ASR model (SenseVoice) to fixed local directory
+    if not os.path.isdir(ASR_LOCAL_DIR) or not os.path.exists(os.path.join(ASR_LOCAL_DIR, "model.pt")):
+        try:
+            from huggingface_hub import snapshot_download
+            asr_model_id = "FunAudioLLM/SenseVoiceSmall"
+            print(f"Pre-downloading ASR model: {asr_model_id} -> {ASR_LOCAL_DIR}")
+            os.makedirs(ASR_LOCAL_DIR, exist_ok=True)
+            snapshot_download(
+                repo_id=asr_model_id,
+                local_dir=ASR_LOCAL_DIR,
+            )
+            print(f"ASR model downloaded to: {ASR_LOCAL_DIR}")
+        except Exception as e:
+            print(f"Warning: Failed to pre-download ASR model: {e}")
+    else:
+        print(f"ASR model already exists at: {ASR_LOCAL_DIR}")
+    
+    # Pre-download VoxCPM model to fixed local directory
+    if not os.path.isdir(VOXCPM_LOCAL_DIR) or not os.path.exists(os.path.join(VOXCPM_LOCAL_DIR, "model.safetensors")):
+        try:
+            from huggingface_hub import snapshot_download
+            voxcpm_model_id = os.environ.get("HF_REPO_ID", "openbmb/VoxCPM1.5")
+            print(f"Pre-downloading VoxCPM model: {voxcpm_model_id} -> {VOXCPM_LOCAL_DIR}")
+            os.makedirs(VOXCPM_LOCAL_DIR, exist_ok=True)
+            snapshot_download(
+                repo_id=voxcpm_model_id,
+                local_dir=VOXCPM_LOCAL_DIR,
+            )
+            print(f"VoxCPM model downloaded to: {VOXCPM_LOCAL_DIR}")
+        except Exception as e:
+            print(f"Warning: Failed to pre-download VoxCPM model: {e}")
+    else:
+        print(f"VoxCPM model already exists at: {VOXCPM_LOCAL_DIR}")
     
     print("=" * 50)
     print("Model pre-download complete!")
@@ -80,49 +104,24 @@ def predownload_models():
 predownload_models()
 
 
-def _resolve_model_dir() -> str:
-    """
-    Resolve model directory:
-    1) Use local checkpoint directory if exists
-    2) If HF_REPO_ID env is set, download into models/{repo}
-    3) Fallback to 'models'
-    """
-    if os.path.isdir(_default_local_model_dir):
-        return _default_local_model_dir
-
-    repo_id = os.environ.get("HF_REPO_ID", "").strip()
-    if len(repo_id) > 0:
-        target_dir = os.path.join("models", repo_id.replace("/", "__"))
-        if not os.path.isdir(target_dir):
-            try:
-                from huggingface_hub import snapshot_download
-                os.makedirs(target_dir, exist_ok=True)
-                print(f"Downloading model from HF repo '{repo_id}' to '{target_dir}' ...")
-                snapshot_download(repo_id=repo_id, local_dir=target_dir, local_dir_use_symlinks=False)
-            except Exception as e:
-                print(f"Warning: HF download failed: {e}. Falling back to 'models'.")
-                return "models"
-        return target_dir
-    return "models"
-
-
 def get_asr_model():
-    """Lazy load ASR model from HuggingFace."""
+    """Lazy load ASR model from local directory."""
     global _asr_model
     if _asr_model is None:
-        setup_cache_env()
-        
         from funasr import AutoModel
+        print("=" * 50)
         print("Loading ASR model...")
-        print(f"  HF_HOME={os.environ.get('HF_HOME')}")
+        print(f"  Using local path: {ASR_LOCAL_DIR}")
+        start_time = time.time()
         _asr_model = AutoModel(
-            model="FunAudioLLM/SenseVoiceSmall",  # HuggingFace model ID
-            hub="hf",  # Use HuggingFace Hub
+            model=ASR_LOCAL_DIR,  # Use local directory path
             disable_update=True,
             log_level='INFO',
             device="cuda:0",
         )
-        print("ASR model loaded.")
+        load_time = time.time() - start_time
+        print(f"ASR model loaded. (耗时: {load_time:.2f}s)")
+        print("=" * 50)
     return _asr_model
 
 
@@ -130,19 +129,19 @@ def get_voxcpm_model():
     """Lazy load VoxCPM model (without denoiser)."""
     global _voxcpm_model
     if _voxcpm_model is None:
-        setup_cache_env()
-        
         import voxcpm
+        print("=" * 50)
         print("Loading VoxCPM model...")
-        model_dir = _resolve_model_dir()
-        print(f"Using model dir: {model_dir}")
-        
+        print(f"  Using local path: {VOXCPM_LOCAL_DIR}")
+        start_time = time.time()
         _voxcpm_model = voxcpm.VoxCPM(
-            voxcpm_model_path=model_dir, 
+            voxcpm_model_path=VOXCPM_LOCAL_DIR, 
             optimize=False,
             enable_denoiser=False,  # Disable denoiser to avoid ZipEnhancer download
         )
-        print("VoxCPM model loaded.")
+        load_time = time.time() - start_time
+        print(f"VoxCPM model loaded. (耗时: {load_time:.2f}s)")
+        print("=" * 50)
     return _voxcpm_model
 
 
@@ -151,9 +150,16 @@ def prompt_wav_recognition(prompt_wav: Optional[str]) -> str:
     """Use ASR to recognize prompt audio text."""
     if prompt_wav is None or not prompt_wav.strip():
         return ""
+    print("=" * 50)
+    print("[ASR] 开始语音识别...")
     asr_model = get_asr_model()
+    start_time = time.time()
     res = asr_model.generate(input=prompt_wav, language="auto", use_itn=True)
+    inference_time = time.time() - start_time
     text = res[0]["text"].split('|>')[-1]
+    print(f"[ASR] 识别结果: {text}")
+    print(f"[ASR] 推理耗时: {inference_time:.2f}s")
+    print("=" * 50)
     return text
 
 
@@ -187,7 +193,10 @@ def generate_tts_audio_gpu(
             prompt_wav_path = f.name
 
     try:
-        print(f"Generating audio for text: '{text[:60]}...'")
+        print("=" * 50)
+        print("[TTS] 开始语音合成...")
+        print(f"[TTS] 目标文本: {text}")
+        start_time = time.time()
         wav = voxcpm_model.generate(
             text=text,
             prompt_text=prompt_text,
@@ -197,6 +206,11 @@ def generate_tts_audio_gpu(
             normalize=do_normalize,
             denoise=False,  # Denoiser disabled
         )
+        inference_time = time.time() - start_time
+        audio_duration = len(wav) / voxcpm_model.tts_model.sample_rate
+        rtf = inference_time / audio_duration if audio_duration > 0 else 0
+        print(f"[TTS] 推理耗时: {inference_time:.2f}s | 音频时长: {audio_duration:.2f}s | RTF: {rtf:.3f}")
+        print("=" * 50)
         return (voxcpm_model.tts_model.sample_rate, wav)
     finally:
         # Cleanup temp file
