@@ -34,6 +34,10 @@ def setup_cache_env():
 # Setup cache in main process BEFORE any imports
 setup_cache_env()
 
+# Limit thread count to avoid OpenBLAS resource errors in ZeroGPU
+os.environ["OPENBLAS_NUM_THREADS"] = "4"
+os.environ["OMP_NUM_THREADS"] = "4"
+os.environ["MKL_NUM_THREADS"] = "4"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 if os.environ.get("HF_REPO_ID", "").strip() == "":
     os.environ["HF_REPO_ID"] = "openbmb/VoxCPM1.5"
@@ -135,7 +139,7 @@ def get_voxcpm_model():
         
         _voxcpm_model = voxcpm.VoxCPM(
             voxcpm_model_path=model_dir, 
-            optimize=True,
+            optimize=False,
             enable_denoiser=False,  # Disable denoiser to avoid ZipEnhancer download
         )
         print("VoxCPM model loaded.")
