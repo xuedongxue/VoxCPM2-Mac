@@ -8,6 +8,13 @@ from pathlib import Path
 import tempfile
 import soundfile as sf
 import time
+from datetime import datetime
+
+
+def log(msg: str):
+    """打印带时间戳的日志"""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] {msg}")
 
 
 def setup_cache_env():
@@ -109,9 +116,8 @@ def get_asr_model():
     global _asr_model
     if _asr_model is None:
         from funasr import AutoModel
-        print("=" * 50)
-        print("Loading ASR model...")
-        print(f"  Using local path: {ASR_LOCAL_DIR}")
+        log("=" * 50)
+        log(f"Loading ASR model from: {ASR_LOCAL_DIR}")
         start_time = time.time()
         _asr_model = AutoModel(
             model=ASR_LOCAL_DIR,  # Use local directory path
@@ -120,8 +126,8 @@ def get_asr_model():
             device="cuda:0",
         )
         load_time = time.time() - start_time
-        print(f"ASR model loaded. (耗时: {load_time:.2f}s)")
-        print("=" * 50)
+        log(f"ASR model loaded. (耗时: {load_time:.2f}s)")
+        log("=" * 50)
     return _asr_model
 
 
@@ -130,9 +136,8 @@ def get_voxcpm_model():
     global _voxcpm_model
     if _voxcpm_model is None:
         import voxcpm
-        print("=" * 50)
-        print("Loading VoxCPM model...")
-        print(f"  Using local path: {VOXCPM_LOCAL_DIR}")
+        log("=" * 50)
+        log(f"Loading VoxCPM model from: {VOXCPM_LOCAL_DIR}")
         start_time = time.time()
         _voxcpm_model = voxcpm.VoxCPM(
             voxcpm_model_path=VOXCPM_LOCAL_DIR, 
@@ -140,8 +145,8 @@ def get_voxcpm_model():
             enable_denoiser=False,  # Disable denoiser to avoid ZipEnhancer download
         )
         load_time = time.time() - start_time
-        print(f"VoxCPM model loaded. (耗时: {load_time:.2f}s)")
-        print("=" * 50)
+        log(f"VoxCPM model loaded. (耗时: {load_time:.2f}s)")
+        log("=" * 50)
     return _voxcpm_model
 
 
@@ -150,16 +155,16 @@ def prompt_wav_recognition(prompt_wav: Optional[str]) -> str:
     """Use ASR to recognize prompt audio text."""
     if prompt_wav is None or not prompt_wav.strip():
         return ""
-    print("=" * 50)
-    print("[ASR] 开始语音识别...")
+    log("=" * 50)
+    log("[ASR] 开始语音识别...")
     asr_model = get_asr_model()
     start_time = time.time()
     res = asr_model.generate(input=prompt_wav, language="auto", use_itn=True)
     inference_time = time.time() - start_time
     text = res[0]["text"].split('|>')[-1]
-    print(f"[ASR] 识别结果: {text}")
-    print(f"[ASR] 推理耗时: {inference_time:.2f}s")
-    print("=" * 50)
+    log(f"[ASR] 识别结果: {text}")
+    log(f"[ASR] 推理耗时: {inference_time:.2f}s")
+    log("=" * 50)
     return text
 
 
@@ -193,9 +198,9 @@ def generate_tts_audio_gpu(
             prompt_wav_path = f.name
 
     try:
-        print("=" * 50)
-        print("[TTS] 开始语音合成...")
-        print(f"[TTS] 目标文本: {text}")
+        log("=" * 50)
+        log("[TTS] 开始语音合成...")
+        log(f"[TTS] 目标文本: {text}")
         start_time = time.time()
         wav = voxcpm_model.generate(
             text=text,
@@ -209,8 +214,8 @@ def generate_tts_audio_gpu(
         inference_time = time.time() - start_time
         audio_duration = len(wav) / voxcpm_model.tts_model.sample_rate
         rtf = inference_time / audio_duration if audio_duration > 0 else 0
-        print(f"[TTS] 推理耗时: {inference_time:.2f}s | 音频时长: {audio_duration:.2f}s | RTF: {rtf:.3f}")
-        print("=" * 50)
+        log(f"[TTS] 推理耗时: {inference_time:.2f}s | 音频时长: {audio_duration:.2f}s | RTF: {rtf:.3f}")
+        log("=" * 50)
         return (voxcpm_model.tts_model.sample_rate, wav)
     finally:
         # Cleanup temp file
