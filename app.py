@@ -14,9 +14,6 @@ os.environ["OPENBLAS_NUM_THREADS"] = "4"
 os.environ["OMP_NUM_THREADS"] = "4"
 os.environ["MKL_NUM_THREADS"] = "4"
 
-torch.backends.cuda.enable_flash_sdp(False)
-torch.backends.cuda.enable_mem_efficient_sdp(False)
-
 if os.environ.get("HF_REPO_ID", "").strip() == "":
     os.environ["HF_REPO_ID"] = "openbmb/VoxCPM2"
 
@@ -291,6 +288,9 @@ def get_voxcpm_model():
     global _voxcpm_model
     if _voxcpm_model is None:
         import voxcpm
+
+        torch.backends.cuda.enable_flash_sdp(False)
+        torch.backends.cuda.enable_mem_efficient_sdp(False)
 
         logger.info(f"Loading VoxCPM model from {VOXCPM_LOCAL_DIR} ...")
         _voxcpm_model = voxcpm.VoxCPM(
