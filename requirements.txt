@@ -1,7 +1,5 @@
-# Core dependencies
-gradio>=4.0.0,<6.0.0
-requests>=2.25.0
+huggingface-hub
+funasr
 numpy>=1.21.0
-soundfile>=0.12.1
-voxcpm>=1.5.0
-torchcodec
+spaces
+voxcpm @ git+https://github.com/OpenBMB/VoxCPM.git@dev_2.0
