@@ -5,7 +5,18 @@ import sys
 from pathlib import Path
 from typing import Optional, Tuple
 
-# Install voxcpm without deps to avoid overwriting ZeroGPU's pre-installed torch/torchaudio
+# ZeroGPU pre-installs torch (CUDA 12.x) but NOT torchaudio.
+# PyPI default torchaudio links against CUDA 13 which is unavailable on ZeroGPU.
+# Install CPU-only torchaudio (sufficient for audio I/O) then voxcpm without deps.
+try:
+    import torchaudio  # noqa: F401
+except (ImportError, OSError):
+    subprocess.check_call([
+        sys.executable, "-m", "pip", "install", "--no-deps",
+        "--index-url", "https://download.pytorch.org/whl/cpu",
+        "torchaudio",
+    ])
+
 try:
     import voxcpm  # noqa: F401
 except ImportError:
