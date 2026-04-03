@@ -291,7 +291,7 @@ def get_voxcpm_model():
 
         logger.info(f"Loading VoxCPM model from {VOXCPM_LOCAL_DIR} ...")
         _voxcpm_model = voxcpm.VoxCPM(
-            voxcpm_model_path=VOXCPM_LOCAL_DIR, optimize=True
+            voxcpm_model_path=VOXCPM_LOCAL_DIR, optimize=False
         )
         logger.info("VoxCPM model loaded.")
     return _voxcpm_model
