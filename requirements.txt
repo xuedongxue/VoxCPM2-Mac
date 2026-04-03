@@ -2,4 +2,20 @@ huggingface-hub
 funasr
 numpy>=1.21.0
 spaces
-voxcpm @ git+https://github.com/OpenBMB/VoxCPM.git@dev_2.0
+transformers>=4.36.2
+einops
+inflect
+addict
+wetext
+modelscope>=1.22.0
+datasets>=3,<4
+pydantic
+tqdm
+simplejson
+sortedcontainers
+soundfile
+librosa
+matplotlib
+argbind
+safetensors
+torchcodec

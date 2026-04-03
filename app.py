@@ -1,14 +1,24 @@
 import logging
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Optional, Tuple
+
+# Install voxcpm without deps to avoid overwriting ZeroGPU's pre-installed torch/torchaudio
+try:
+    import voxcpm  # noqa: F401
+except ImportError:
+    subprocess.check_call([
+        sys.executable, "-m", "pip", "install", "--no-deps",
+        "voxcpm @ git+https://github.com/OpenBMB/VoxCPM.git@dev_2.0",
+    ])
+    import voxcpm  # noqa: F401
 
 import gradio as gr
 import numpy as np
 import spaces
 import torch
-import voxcpm
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["OPENBLAS_NUM_THREADS"] = "4"
