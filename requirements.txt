@@ -1,5 +1,3 @@
-torch==2.5.0
-torchaudio==2.5.0
 huggingface-hub
 funasr
 numpy>=1.21.0
