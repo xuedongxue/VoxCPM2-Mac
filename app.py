@@ -8,6 +8,7 @@ import gradio as gr
 import numpy as np
 import spaces
 import torch
+import voxcpm
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["OPENBLAS_NUM_THREADS"] = "4"
@@ -287,10 +288,14 @@ def get_asr_model():
 def get_voxcpm_model():
     global _voxcpm_model
     if _voxcpm_model is None:
-        import voxcpm
+        logger.info(
+            f"[DEBUG] CUDA available: {torch.cuda.is_available()}, "
+            f"device count: {torch.cuda.device_count() if torch.cuda.is_available() else 0}"
+        )
 
-        torch.backends.cuda.enable_flash_sdp(False)
-        torch.backends.cuda.enable_mem_efficient_sdp(False)
+        if torch.cuda.is_available():
+            torch.backends.cuda.enable_flash_sdp(False)
+            torch.backends.cuda.enable_mem_efficient_sdp(False)
 
         logger.info(f"Loading VoxCPM model from {VOXCPM_LOCAL_DIR} ...")
         _voxcpm_model = voxcpm.VoxCPM(
