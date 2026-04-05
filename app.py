@@ -1,10 +1,9 @@
 import atexit
 import logging
 import os
-import subprocess
 import sys
 from pathlib import Path
-from threading import Lock
+from threading import Lock, Thread
 from typing import Optional, Tuple
 
 import gradio as gr
@@ -30,11 +29,42 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+def _configure_cache_dirs() -> None:
+    persistent_root = Path(os.environ.get("SPACE_PERSISTENT_ROOT", "/data")).expanduser()
+    if not persistent_root.exists():
+        return
+
+    cache_root = Path(
+        os.environ.get("VoxCPM_CACHE_ROOT", str(persistent_root / ".cache"))
+    ).expanduser()
+    hf_home = Path(os.environ.get("HF_HOME", str(persistent_root / ".huggingface"))).expanduser()
+    gradio_tmp = Path(
+        os.environ.get("GRADIO_TEMP_DIR", str(cache_root / "gradio"))
+    ).expanduser()
+    pip_cache = Path(os.environ.get("PIP_CACHE_DIR", str(cache_root / "pip"))).expanduser()
+
+    for path in (cache_root, hf_home, gradio_tmp, pip_cache):
+        path.mkdir(parents=True, exist_ok=True)
+
+    os.environ.setdefault("XDG_CACHE_HOME", str(cache_root))
+    os.environ.setdefault("HF_HOME", str(hf_home))
+    os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(hf_home / "hub"))
+    os.environ.setdefault("PIP_CACHE_DIR", str(pip_cache))
+    os.environ.setdefault("GRADIO_TEMP_DIR", str(gradio_tmp))
+    logger.info(f"Using persistent cache directories under {persistent_root}")
+
+
+_configure_cache_dirs()
+
 _asr_model = None
 _voxcpm_server = None
 _model_info = None
 _server_inference_timesteps = None
 _server_lock = Lock()
+_prewarm_lock = Lock()
+_prewarm_started = False
+_runtime_diag_logged = False
 
 
 def _get_int_env(name: str, default: int) -> int:
@@ -70,6 +100,9 @@ def _get_devices_env() -> list[int]:
     return [int(part) for part in values]
 
 
+DEFAULT_INFERENCE_TIMESTEPS = _get_int_env("NANOVLLM_INFERENCE_TIMESTEPS", 10)
+
+
 def _resolve_model_ref() -> str:
     for env_name in ("NANOVLLM_MODEL", "NANOVLLM_MODEL_PATH", "HF_REPO_ID"):
         value = os.environ.get(env_name, "").strip()
@@ -78,60 +111,25 @@ def _resolve_model_ref() -> str:
     return DEFAULT_MODEL_REF
 
 
-def _resolve_flash_attn_wheel_url() -> str:
-    override = os.environ.get("FLASH_ATTN_WHEEL_URL", "").strip()
-    if override:
-        return override
+def _log_runtime_diagnostics_once() -> None:
+    global _runtime_diag_logged
+    if _runtime_diag_logged:
+        return
 
     import torch
 
-    py_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
-    abi_flag = "TRUE" if torch._C._GLIBCXX_USE_CXX11_ABI else "FALSE"
-    torch_major_minor = ".".join(torch.__version__.split("+")[0].split(".")[:2])
-    wheel_name = (
-        f"flash_attn-2.8.3+cu12torch{torch_major_minor}cxx11abi{abi_flag}-"
-        f"{py_tag}-{py_tag}-linux_x86_64.whl"
-    )
-    return f"https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/{wheel_name}"
-
-
-def _ensure_nanovllm_runtime() -> None:
-    try:
-        import flash_attn  # noqa: F401
-    except ImportError:
-        wheel_url = _resolve_flash_attn_wheel_url()
-        logger.info(f"Installing flash-attn wheel at runtime from {wheel_url} ...")
-        try:
-            subprocess.check_call(
-                [
-                    sys.executable,
-                    "-m",
-                    "pip",
-                    "install",
-                    "--no-deps",
-                    wheel_url,
-                ]
-            )
-        except subprocess.CalledProcessError as exc:
-            raise RuntimeError(
-                "Failed to install the configured flash-attn wheel. "
-                "Set FLASH_ATTN_WHEEL_URL to a matching prebuilt wheel for this Space."
-            ) from exc
-
-    try:
-        import nanovllm_voxcpm  # noqa: F401
-    except ImportError:
-        logger.info("Installing nanovllm-voxcpm at runtime ...")
-        subprocess.check_call(
-            [
-                sys.executable,
-                "-m",
-                "pip",
-                "install",
-                "--no-deps",
-                "git+https://github.com/a710128/nanovllm-voxcpm.git",
-            ]
-        )
+    info = {
+        "python": sys.version.split()[0],
+        "torch": torch.__version__,
+        "cuda": torch.version.cuda,
+        "cuda_available": torch.cuda.is_available(),
+        "cuda_device_count": torch.cuda.device_count(),
+        "cxx11abi": bool(torch._C._GLIBCXX_USE_CXX11_ABI),
+        "model_ref": _resolve_model_ref(),
+        "devices": _get_devices_env(),
+    }
+    logger.info(f"Runtime diagnostics: {info}")
+    _runtime_diag_logged = True
 
 
 def _extract_asr_text(asr_result) -> str:
@@ -409,7 +407,7 @@ def get_voxcpm_server(inference_timesteps: int):
             )
             _stop_server_if_needed()
 
-        _ensure_nanovllm_runtime()
+        _log_runtime_diagnostics_once()
         from nanovllm_voxcpm import VoxCPM
 
         model_ref = _resolve_model_ref()
@@ -441,6 +439,30 @@ def get_model_info(inference_timesteps: int) -> dict:
     return _model_info
 
 
+def _prewarm_backend() -> None:
+    try:
+        logger.info(
+            f"Starting backend prewarm with inference_timesteps={DEFAULT_INFERENCE_TIMESTEPS} ..."
+        )
+        get_voxcpm_server(DEFAULT_INFERENCE_TIMESTEPS)
+        logger.info("Backend prewarm completed.")
+    except Exception as exc:
+        logger.warning(f"Backend prewarm failed: {exc}")
+
+
+def _start_background_prewarm() -> None:
+    global _prewarm_started
+    if not _get_bool_env("NANOVLLM_PREWARM", True):
+        return
+
+    with _prewarm_lock:
+        if _prewarm_started:
+            return
+        _prewarm_started = True
+
+    Thread(target=_prewarm_backend, name="nanovllm-prewarm", daemon=True).start()
+
+
 # ---------- GPU-accelerated inference ----------
 
 
@@ -453,7 +475,12 @@ def prompt_wav_recognition(use_prompt_text: bool, prompt_wav: Optional[str]) -> 
     return _extract_asr_text(res)
 
 
-def generate_tts_audio(
+def _float_audio_to_int16(wav: np.ndarray) -> np.ndarray:
+    clipped = np.clip(wav, -1.0, 1.0)
+    return (clipped * 32767.0).astype(np.int16, copy=False)
+
+
+def _generate_tts_audio_once(
     text_input: str,
     control_instruction: str = "",
     reference_wav_path_input: Optional[str] = None,
@@ -524,7 +551,50 @@ def generate_tts_audio(
         raise RuntimeError("The model returned no audio chunks.")
 
     wav = np.concatenate(chunks, axis=0).astype(np.float32, copy=False)
+    wav = _float_audio_to_int16(wav)
     return (int(model_info["sample_rate"]), wav)
+
+
+def generate_tts_audio(
+    text_input: str,
+    control_instruction: str = "",
+    reference_wav_path_input: Optional[str] = None,
+    use_prompt_text: bool = False,
+    prompt_text_input: str = "",
+    cfg_value_input: float = 2.0,
+    do_normalize: bool = True,
+    denoise: bool = True,
+    inference_timesteps: int = 10,
+) -> Tuple[int, np.ndarray]:
+    try:
+        return _generate_tts_audio_once(
+            text_input=text_input,
+            control_instruction=control_instruction,
+            reference_wav_path_input=reference_wav_path_input,
+            use_prompt_text=use_prompt_text,
+            prompt_text_input=prompt_text_input,
+            cfg_value_input=cfg_value_input,
+            do_normalize=do_normalize,
+            denoise=denoise,
+            inference_timesteps=inference_timesteps,
+        )
+    except ValueError:
+        raise
+    except Exception as exc:
+        logger.warning(f"Generation failed, restarting backend and retrying once: {exc}")
+        with _server_lock:
+            _stop_server_if_needed()
+        return _generate_tts_audio_once(
+            text_input=text_input,
+            control_instruction=control_instruction,
+            reference_wav_path_input=reference_wav_path_input,
+            use_prompt_text=use_prompt_text,
+            prompt_text_input=prompt_text_input,
+            cfg_value_input=cfg_value_input,
+            do_normalize=do_normalize,
+            denoise=denoise,
+            inference_timesteps=inference_timesteps,
+        )
 
 
 # ---------- UI ----------
@@ -620,7 +690,7 @@ def create_demo_interface():
                     dit_steps = gr.Slider(
                         minimum=1,
                         maximum=50,
-                        value=10,
+                        value=DEFAULT_INFERENCE_TIMESTEPS,
                         step=1,
                         label=I18N("dit_steps_label"),
                         info=I18N("dit_steps_info"),
@@ -667,13 +737,18 @@ def run_demo(
     server_name: str = "0.0.0.0", server_port: int = 7860, show_error: bool = True
 ):
     interface = create_demo_interface()
-    interface.queue(max_size=10, default_concurrency_limit=1).launch(
+    _start_background_prewarm()
+    interface.queue(
+        max_size=_get_int_env("GRADIO_QUEUE_MAX_SIZE", 10),
+        default_concurrency_limit=_get_int_env("GRADIO_DEFAULT_CONCURRENCY_LIMIT", 1),
+    ).launch(
         server_name=server_name,
         server_port=int(os.environ.get("PORT", server_port)),
         show_error=show_error,
         i18n=I18N,
         theme=_APP_THEME,
         css=_CUSTOM_CSS,
+        ssr_mode=_get_bool_env("GRADIO_SSR_MODE", False),
     )
 
 
