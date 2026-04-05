@@ -18,4 +18,5 @@ librosa
 matplotlib
 argbind
 safetensors
+torchaudio==2.5.0
 torchcodec
