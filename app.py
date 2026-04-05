@@ -82,7 +82,7 @@ def _ensure_nanovllm_runtime() -> None:
     try:
         import flash_attn  # noqa: F401
     except ImportError:
-        logger.info("Installing flash-attn at runtime ...")
+        logger.info("Installing pinned flash-attn at runtime ...")
         subprocess.check_call(
             [
                 sys.executable,
@@ -90,7 +90,8 @@ def _ensure_nanovllm_runtime() -> None:
                 "pip",
                 "install",
                 "--no-build-isolation",
-                "flash-attn",
+                "--no-deps",
+                "flash-attn==2.6.3",
             ]
         )
 
