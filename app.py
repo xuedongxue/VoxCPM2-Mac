@@ -1,54 +1,27 @@
+import atexit
 import logging
 import os
 import subprocess
 import sys
 from pathlib import Path
+from threading import Lock
 from typing import Optional, Tuple
-
-def _ensure_torchaudio():
-    """Install torchaudio matching ZeroGPU's pre-installed torch + CUDA version."""
-    try:
-        import torchaudio  # noqa: F401
-        return
-    except (ImportError, OSError):
-        pass
-    import torch
-    torch_ver = torch.__version__.split("+")[0]
-    cuda_ver = torch.version.cuda
-    if cuda_ver:
-        tag = "cu" + cuda_ver.replace(".", "")
-    else:
-        tag = "cpu"
-    index = f"https://download.pytorch.org/whl/{tag}"
-    subprocess.check_call([
-        sys.executable, "-m", "pip", "install", "--no-deps",
-        "--index-url", index,
-        f"torchaudio=={torch_ver}",
-    ])
-
-_ensure_torchaudio()
-
-try:
-    import voxcpm  # noqa: F401
-except ImportError:
-    subprocess.check_call([
-        sys.executable, "-m", "pip", "install", "--no-deps",
-        "voxcpm @ git+https://github.com/OpenBMB/VoxCPM.git@dev_2.0",
-    ])
-    import voxcpm  # noqa: F401
 
 import gradio as gr
 import numpy as np
-import spaces
-import torch
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["OPENBLAS_NUM_THREADS"] = "4"
 os.environ["OMP_NUM_THREADS"] = "4"
 os.environ["MKL_NUM_THREADS"] = "4"
 
-if os.environ.get("HF_REPO_ID", "").strip() == "":
-    os.environ["HF_REPO_ID"] = "openbmb/VoxCPM2"
+DEFAULT_MODEL_REF = "openbmb/VoxCPM2"
+if (
+    os.environ.get("NANOVLLM_MODEL", "").strip() == ""
+    and os.environ.get("NANOVLLM_MODEL_PATH", "").strip() == ""
+    and os.environ.get("HF_REPO_ID", "").strip() == ""
+):
+    os.environ["HF_REPO_ID"] = DEFAULT_MODEL_REF
 
 logging.basicConfig(
     level=logging.INFO,
@@ -56,6 +29,132 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger(__name__)
+
+_asr_model = None
+_voxcpm_server = None
+_model_info = None
+_server_inference_timesteps = None
+_server_lock = Lock()
+
+
+def _get_int_env(name: str, default: int) -> int:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        return default
+    return int(value)
+
+
+def _get_float_env(name: str, default: float) -> float:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        return default
+    return float(value)
+
+
+def _get_bool_env(name: str, default: bool) -> bool:
+    value = os.environ.get(name, "").strip().lower()
+    if not value:
+        return default
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"Invalid boolean env: {name}={value!r}")
+
+
+def _get_devices_env() -> list[int]:
+    raw = os.environ.get("NANOVLLM_SERVERPOOL_DEVICES", "0").strip()
+    values = [part.strip() for part in raw.split(",") if part.strip()]
+    if not values:
+        return [0]
+    return [int(part) for part in values]
+
+
+def _resolve_model_ref() -> str:
+    for env_name in ("NANOVLLM_MODEL", "NANOVLLM_MODEL_PATH", "HF_REPO_ID"):
+        value = os.environ.get(env_name, "").strip()
+        if value:
+            return value
+    return DEFAULT_MODEL_REF
+
+
+def _ensure_nanovllm_runtime() -> None:
+    try:
+        import flash_attn  # noqa: F401
+    except ImportError:
+        logger.info("Installing flash-attn at runtime ...")
+        subprocess.check_call(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--no-build-isolation",
+                "flash-attn",
+            ]
+        )
+
+    try:
+        import nanovllm_voxcpm  # noqa: F401
+    except ImportError:
+        logger.info("Installing nanovllm-voxcpm at runtime ...")
+        subprocess.check_call(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--no-deps",
+                "git+https://github.com/a710128/nanovllm-voxcpm.git",
+            ]
+        )
+
+
+def _extract_asr_text(asr_result) -> str:
+    if not asr_result:
+        return ""
+
+    first_item = asr_result[0]
+    if isinstance(first_item, dict):
+        return str(first_item.get("text", "")).split("|>")[-1].strip()
+    return ""
+
+
+def _read_audio_bytes(audio_path: Optional[str]) -> tuple[bytes | None, str | None]:
+    if audio_path is None or not audio_path.strip():
+        return None, None
+
+    path = Path(audio_path)
+    audio_format = path.suffix.lstrip(".").lower() or "wav"
+    return path.read_bytes(), audio_format
+
+
+def _safe_prompt_wav_recognition(use_prompt_text: bool, prompt_wav: Optional[str]) -> str:
+    try:
+        return prompt_wav_recognition(use_prompt_text, prompt_wav)
+    except Exception as exc:
+        logger.warning(f"ASR recognition failed: {exc}")
+        return ""
+
+
+def _stop_server_if_needed() -> None:
+    global _voxcpm_server, _model_info, _server_inference_timesteps
+    if _voxcpm_server is None:
+        return
+
+    stop = getattr(_voxcpm_server, "stop", None)
+    if callable(stop):
+        try:
+            stop()
+        except Exception as exc:
+            logger.warning(f"Failed to stop nano-vLLM server cleanly: {exc}")
+
+    _voxcpm_server = None
+    _model_info = None
+    _server_inference_timesteps = None
+
+
+atexit.register(_stop_server_if_needed)
 
 # ---------- Inline i18n (en + zh-CN only) ----------
 
@@ -253,62 +352,15 @@ _APP_THEME = gr.themes.Soft(
     font=[gr.themes.GoogleFont("Inter"), "Arial", "sans-serif"],
 )
 
-# ---------- Model Pre-download & Loading ----------
-
-ASR_LOCAL_DIR = "./models/SenseVoiceSmall"
-VOXCPM_LOCAL_DIR = "./models/VoxCPM2"
-
-_asr_model = None
-_voxcpm_model = None
-
-
-def predownload_models():
-    from huggingface_hub import snapshot_download
-
-    if not os.path.isdir(ASR_LOCAL_DIR) or not os.path.exists(
-        os.path.join(ASR_LOCAL_DIR, "model.pt")
-    ):
-        logger.info(f"Pre-downloading ASR model to {ASR_LOCAL_DIR} ...")
-        os.makedirs(ASR_LOCAL_DIR, exist_ok=True)
-        try:
-            snapshot_download(
-                repo_id="FunAudioLLM/SenseVoiceSmall", local_dir=ASR_LOCAL_DIR
-            )
-            logger.info("ASR model downloaded.")
-        except Exception as exc:
-            logger.warning(f"Failed to pre-download ASR model: {exc}")
-    else:
-        logger.info(f"ASR model already at {ASR_LOCAL_DIR}")
-
-    voxcpm_repo_id = os.environ.get("HF_REPO_ID", "openbmb/VoxCPM2")
-    if not os.path.isdir(VOXCPM_LOCAL_DIR) or not os.path.exists(
-        os.path.join(VOXCPM_LOCAL_DIR, "config.json")
-    ):
-        logger.info(
-            f"Pre-downloading VoxCPM model {voxcpm_repo_id} to {VOXCPM_LOCAL_DIR} ..."
-        )
-        os.makedirs(VOXCPM_LOCAL_DIR, exist_ok=True)
-        try:
-            snapshot_download(repo_id=voxcpm_repo_id, local_dir=VOXCPM_LOCAL_DIR)
-            logger.info("VoxCPM model downloaded.")
-        except Exception as exc:
-            logger.warning(f"Failed to pre-download VoxCPM model: {exc}")
-    else:
-        logger.info(f"VoxCPM model already at {VOXCPM_LOCAL_DIR}")
-
-
-predownload_models()
-
-
 def get_asr_model():
     global _asr_model
     if _asr_model is None:
         from funasr import AutoModel
 
-        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        device = os.environ.get("ASR_DEVICE", "cpu").strip() or "cpu"
         logger.info(f"Loading ASR model on {device} ...")
         _asr_model = AutoModel(
-            model=ASR_LOCAL_DIR,
+            model="iic/SenseVoiceSmall",
             disable_update=True,
             log_level="INFO",
             device=device,
@@ -317,40 +369,66 @@ def get_asr_model():
     return _asr_model
 
 
-def get_voxcpm_model():
-    global _voxcpm_model
-    if _voxcpm_model is None:
+def get_voxcpm_server(inference_timesteps: int):
+    global _voxcpm_server, _model_info, _server_inference_timesteps
+    if _voxcpm_server is not None and _server_inference_timesteps == inference_timesteps:
+        return _voxcpm_server
+
+    with _server_lock:
+        if _voxcpm_server is not None and _server_inference_timesteps == inference_timesteps:
+            return _voxcpm_server
+
+        if _voxcpm_server is not None and _server_inference_timesteps != inference_timesteps:
+            logger.info(
+                f"Rebuilding nano-vLLM server for inference_timesteps={inference_timesteps} "
+                f"(previous={_server_inference_timesteps})"
+            )
+            _stop_server_if_needed()
+
+        _ensure_nanovllm_runtime()
+        from nanovllm_voxcpm import VoxCPM
+
+        model_ref = _resolve_model_ref()
         logger.info(
-            f"[DEBUG] CUDA available: {torch.cuda.is_available()}, "
-            f"device count: {torch.cuda.device_count() if torch.cuda.is_available() else 0}"
+            f"Loading nano-vLLM VoxCPM server from {model_ref} "
+            f"with inference_timesteps={inference_timesteps} ..."
         )
-
-        if torch.cuda.is_available():
-            torch.backends.cuda.enable_flash_sdp(False)
-            torch.backends.cuda.enable_mem_efficient_sdp(False)
-
-        logger.info(f"Loading VoxCPM model from {VOXCPM_LOCAL_DIR} ...")
-        _voxcpm_model = voxcpm.VoxCPM(
-            voxcpm_model_path=VOXCPM_LOCAL_DIR, optimize=True
+        _voxcpm_server = VoxCPM.from_pretrained(
+            model=model_ref,
+            inference_timesteps=int(inference_timesteps),
+            max_num_batched_tokens=_get_int_env("NANOVLLM_SERVERPOOL_MAX_NUM_BATCHED_TOKENS", 8192),
+            max_num_seqs=_get_int_env("NANOVLLM_SERVERPOOL_MAX_NUM_SEQS", 16),
+            max_model_len=_get_int_env("NANOVLLM_SERVERPOOL_MAX_MODEL_LEN", 4096),
+            gpu_memory_utilization=_get_float_env("NANOVLLM_SERVERPOOL_GPU_MEMORY_UTILIZATION", 0.95),
+            enforce_eager=_get_bool_env("NANOVLLM_SERVERPOOL_ENFORCE_EAGER", False),
+            devices=_get_devices_env(),
         )
-        logger.info("VoxCPM model loaded.")
-    return _voxcpm_model
+        _model_info = _voxcpm_server.get_model_info()
+        _server_inference_timesteps = inference_timesteps
+        logger.info(f"nano-vLLM VoxCPM server loaded: {_model_info}")
+    return _voxcpm_server
+
+
+def get_model_info(inference_timesteps: int) -> dict:
+    global _model_info
+    if _model_info is None or _server_inference_timesteps != inference_timesteps:
+        get_voxcpm_server(inference_timesteps)
+    assert _model_info is not None
+    return _model_info
 
 
 # ---------- GPU-accelerated inference ----------
 
 
-@spaces.GPU
 def prompt_wav_recognition(use_prompt_text: bool, prompt_wav: Optional[str]) -> str:
     if not use_prompt_text or prompt_wav is None or not prompt_wav.strip():
         return ""
 
     asr_model = get_asr_model()
     res = asr_model.generate(input=prompt_wav, language="auto", use_itn=True)
-    return res[0]["text"].split("|>")[-1]
+    return _extract_asr_text(res)
 
 
-@spaces.GPU(duration=600)
 def generate_tts_audio(
     text_input: str,
     control_instruction: str = "",
@@ -362,7 +440,9 @@ def generate_tts_audio(
     denoise: bool = True,
     inference_timesteps: int = 10,
 ) -> Tuple[int, np.ndarray]:
-    voxcpm_model = get_voxcpm_model()
+    timesteps = int(inference_timesteps)
+    server = get_voxcpm_server(timesteps)
+    model_info = get_model_info(timesteps)
 
     text = (text_input or "").strip()
     if len(text) == 0:
@@ -371,40 +451,65 @@ def generate_tts_audio(
     control = (control_instruction or "").strip()
     final_text = f"({control}){text}" if control and not use_prompt_text else text
 
-    audio_path = reference_wav_path_input if reference_wav_path_input else None
-    prompt_text_clean = (prompt_text_input or "").strip() or None
+    audio_bytes, audio_format = _read_audio_bytes(reference_wav_path_input)
+    prompt_text_clean = (prompt_text_input or "").strip()
+    if use_prompt_text and audio_bytes is None:
+        raise ValueError("Ultimate Cloning Mode requires a reference audio clip.")
+    if use_prompt_text and not prompt_text_clean:
+        raise ValueError(
+            "Ultimate Cloning Mode requires a transcript. Please wait for ASR or fill it in manually."
+        )
     if not use_prompt_text:
-        prompt_text_clean = None
+        prompt_text_clean = ""
 
-    if audio_path and prompt_text_clean:
+    if do_normalize:
+        logger.info("Ignoring normalize option: nano-vLLM backend does not support per-request text normalization.")
+    if denoise:
+        logger.info("Ignoring denoise option: nano-vLLM backend does not support per-request reference denoising.")
+
+    prompt_latents = None
+    ref_audio_latents = None
+    if audio_bytes is not None and audio_format is not None and use_prompt_text:
+        logger.info(f"[Ultimate Cloning] encoding prompt audio as {audio_format}")
+        prompt_latents = server.encode_latents(audio_bytes, audio_format)
+    elif audio_bytes is not None and audio_format is not None:
+        logger.info(f"[Controllable Cloning] encoding reference audio as {audio_format}")
+        ref_audio_latents = server.encode_latents(audio_bytes, audio_format)
+
+    if prompt_latents is not None:
         logger.info("[Ultimate Cloning] reference audio + transcript")
-    elif audio_path:
+    elif ref_audio_latents is not None:
         logger.info("[Controllable Cloning] reference audio only")
     else:
         logger.info(f"[Voice Design] control: {control[:50] if control else 'None'}")
 
-    generate_kwargs = dict(
-        text=final_text,
-        reference_wav_path=audio_path,
-        cfg_value=float(cfg_value_input),
-        inference_timesteps=int(inference_timesteps),
-        normalize=do_normalize,
-        denoise=denoise,
-    )
-    if prompt_text_clean and audio_path:
-        generate_kwargs["prompt_wav_path"] = audio_path
-        generate_kwargs["prompt_text"] = prompt_text_clean
-
+    chunks: list[np.ndarray] = []
     logger.info(f"Generating: '{final_text[:80]}...'")
-    wav = voxcpm_model.generate(**generate_kwargs)
-    return (voxcpm_model.tts_model.sample_rate, wav)
+    for chunk in server.generate(
+        target_text=final_text,
+        prompt_latents=prompt_latents,
+        prompt_text=prompt_text_clean if prompt_latents is not None else "",
+        max_generate_length=_get_int_env("NANOVLLM_MAX_GENERATE_LENGTH", 2000),
+        temperature=_get_float_env("NANOVLLM_TEMPERATURE", 1.0),
+        cfg_value=float(cfg_value_input),
+        ref_audio_latents=ref_audio_latents,
+    ):
+        chunks.append(chunk)
+
+    if not chunks:
+        raise RuntimeError("The model returned no audio chunks.")
+
+    wav = np.concatenate(chunks, axis=0).astype(np.float32, copy=False)
+    return (int(model_info["sample_rate"]), wav)
 
 
 # ---------- UI ----------
 
 
 def create_demo_interface():
-    gr.set_static_paths(paths=[Path.cwd().absolute() / "assets"])
+    assets_dir = Path.cwd().absolute() / "assets"
+    if assets_dir.exists():
+        gr.set_static_paths(paths=[assets_dir])
 
     def _on_toggle_instant(checked):
         if checked:
@@ -420,21 +525,18 @@ def create_demo_interface():
     def _run_asr_if_needed(checked, audio_path):
         if not checked or not audio_path:
             return gr.update()
-        try:
-            logger.info("Running ASR on reference audio...")
-            asr_text = prompt_wav_recognition(True, audio_path)
-            logger.info(f"ASR result: {asr_text[:60]}...")
-            return gr.update(value=asr_text)
-        except Exception as e:
-            logger.warning(f"ASR recognition failed: {e}")
-            return gr.update(value="")
+        logger.info("Running ASR on reference audio...")
+        asr_text = _safe_prompt_wav_recognition(True, audio_path)
+        logger.info(f"ASR result: {asr_text[:60]}...")
+        return gr.update(value=asr_text)
 
     with gr.Blocks() as interface:
-        gr.HTML(
-            '<div class="logo-container">'
-            '<img src="/gradio_api/file=assets/voxcpm_logo.png" alt="VoxCPM Logo">'
-            "</div>"
-        )
+        if (assets_dir / "voxcpm_logo.png").exists():
+            gr.HTML(
+                '<div class="logo-container">'
+                '<img src="/gradio_api/file=assets/voxcpm_logo.png" alt="VoxCPM Logo">'
+                "</div>"
+            )
 
         gr.Markdown(I18N("usage_instructions"))
 

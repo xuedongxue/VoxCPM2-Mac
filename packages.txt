@@ -1,0 +1,7 @@
+build-essential
+git
+ninja-build
+pkg-config
+ffmpeg
+libsndfile1-dev
+python3-dev
