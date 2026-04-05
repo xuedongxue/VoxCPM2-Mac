@@ -78,22 +78,45 @@ def _resolve_model_ref() -> str:
     return DEFAULT_MODEL_REF
 
 
+def _resolve_flash_attn_wheel_url() -> str:
+    override = os.environ.get("FLASH_ATTN_WHEEL_URL", "").strip()
+    if override:
+        return override
+
+    import torch
+
+    py_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
+    abi_flag = "TRUE" if torch._C._GLIBCXX_USE_CXX11_ABI else "FALSE"
+    torch_major_minor = ".".join(torch.__version__.split("+")[0].split(".")[:2])
+    wheel_name = (
+        f"flash_attn-2.8.3+cu12torch{torch_major_minor}cxx11abi{abi_flag}-"
+        f"{py_tag}-{py_tag}-linux_x86_64.whl"
+    )
+    return f"https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/{wheel_name}"
+
+
 def _ensure_nanovllm_runtime() -> None:
     try:
         import flash_attn  # noqa: F401
     except ImportError:
-        logger.info("Installing pinned flash-attn at runtime ...")
-        subprocess.check_call(
-            [
-                sys.executable,
-                "-m",
-                "pip",
-                "install",
-                "--no-build-isolation",
-                "--no-deps",
-                "flash-attn==2.6.3",
-            ]
-        )
+        wheel_url = _resolve_flash_attn_wheel_url()
+        logger.info(f"Installing flash-attn wheel at runtime from {wheel_url} ...")
+        try:
+            subprocess.check_call(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "--no-deps",
+                    wheel_url,
+                ]
+            )
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(
+                "Failed to install the configured flash-attn wheel. "
+                "Set FLASH_ATTN_WHEEL_URL to a matching prebuilt wheel for this Space."
+            ) from exc
 
     try:
         import nanovllm_voxcpm  # noqa: F401
