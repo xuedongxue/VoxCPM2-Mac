@@ -1,6 +1,7 @@
 gradio==6.0.0
 huggingface-hub
 funasr
+modelscope>=1.22.0
 numpy>=1.21.0
 torch==2.5.1
 torchaudio==2.5.1

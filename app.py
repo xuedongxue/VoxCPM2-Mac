@@ -2,6 +2,7 @@ import atexit
 import logging
 import os
 import sys
+import tempfile
 from pathlib import Path
 from threading import Lock, Thread
 from typing import Optional, Tuple
@@ -28,6 +29,9 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger(__name__)
+DEFAULT_ASR_MODEL_REF = "FunAudioLLM/SenseVoiceSmall"
+DEFAULT_ZIPENHANCER_MODEL = "iic/speech_zipenhancer_ans_multiloss_16k_base"
+MAX_REFERENCE_AUDIO_SECONDS = 50.0
 
 
 def _configure_cache_dirs() -> None:
@@ -43,8 +47,11 @@ def _configure_cache_dirs() -> None:
         os.environ.get("GRADIO_TEMP_DIR", str(cache_root / "gradio"))
     ).expanduser()
     pip_cache = Path(os.environ.get("PIP_CACHE_DIR", str(cache_root / "pip"))).expanduser()
+    modelscope_cache = Path(
+        os.environ.get("MODELSCOPE_CACHE", str(cache_root / "modelscope"))
+    ).expanduser()
 
-    for path in (cache_root, hf_home, gradio_tmp, pip_cache):
+    for path in (cache_root, hf_home, gradio_tmp, pip_cache, modelscope_cache):
         path.mkdir(parents=True, exist_ok=True)
 
     os.environ.setdefault("XDG_CACHE_HOME", str(cache_root))
@@ -52,6 +59,7 @@ def _configure_cache_dirs() -> None:
     os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(hf_home / "hub"))
     os.environ.setdefault("PIP_CACHE_DIR", str(pip_cache))
     os.environ.setdefault("GRADIO_TEMP_DIR", str(gradio_tmp))
+    os.environ.setdefault("MODELSCOPE_CACHE", str(modelscope_cache))
     logger.info(f"Using persistent cache directories under {persistent_root}")
 
 
@@ -61,8 +69,10 @@ _asr_model = None
 _voxcpm_server = None
 _model_info = None
 _server_inference_timesteps = None
+_denoiser = None
 _server_lock = Lock()
 _prewarm_lock = Lock()
+_denoiser_lock = Lock()
 _prewarm_started = False
 _runtime_diag_logged = False
 
@@ -111,6 +121,18 @@ def _resolve_model_ref() -> str:
     return DEFAULT_MODEL_REF
 
 
+def _resolve_asr_model_ref() -> str:
+    return DEFAULT_ASR_MODEL_REF
+
+
+def _resolve_zipenhancer_model_ref() -> str:
+    for env_name in ("ZIPENHANCER_MODEL_ID", "ZIPENHANCER_MODEL_PATH"):
+        value = os.environ.get(env_name, "").strip()
+        if value:
+            return value
+    return DEFAULT_ZIPENHANCER_MODEL
+
+
 def _log_runtime_diagnostics_once() -> None:
     global _runtime_diag_logged
     if _runtime_diag_logged:
@@ -132,6 +154,54 @@ def _log_runtime_diagnostics_once() -> None:
     _runtime_diag_logged = True
 
 
+class _ZipEnhancer:
+    def __init__(self, model_ref: str):
+        import torchaudio
+        from modelscope.pipelines import pipeline
+        from modelscope.utils.constant import Tasks
+
+        self._torchaudio = torchaudio
+        self.model_ref = model_ref
+        self._pipeline = pipeline(Tasks.acoustic_noise_suppression, model=model_ref)
+
+    def _normalize_loudness(self, wav_path: str) -> None:
+        audio, sr = self._torchaudio.load(wav_path)
+        loudness = self._torchaudio.functional.loudness(audio, sr)
+        normalized_audio = self._torchaudio.functional.gain(audio, -20 - loudness)
+        self._torchaudio.save(wav_path, normalized_audio, sr)
+
+    def enhance(self, input_path: str) -> str:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
+            output_path = tmp_file.name
+        try:
+            self._pipeline(input_path, output_path=output_path)
+            self._normalize_loudness(output_path)
+            return output_path
+        except Exception:
+            if os.path.exists(output_path):
+                try:
+                    os.unlink(output_path)
+                except OSError:
+                    pass
+            raise
+
+
+def get_denoiser():
+    global _denoiser
+    if _denoiser is not None:
+        return _denoiser
+
+    with _denoiser_lock:
+        if _denoiser is not None:
+            return _denoiser
+
+        model_ref = _resolve_zipenhancer_model_ref()
+        logger.info(f"Loading ZipEnhancer denoiser from {model_ref} ...")
+        _denoiser = _ZipEnhancer(model_ref)
+        logger.info("ZipEnhancer denoiser loaded.")
+    return _denoiser
+
+
 def _extract_asr_text(asr_result) -> str:
     if not asr_result:
         return ""
@@ -149,6 +219,39 @@ def _read_audio_bytes(audio_path: Optional[str]) -> tuple[bytes | None, str | No
     path = Path(audio_path)
     audio_format = path.suffix.lstrip(".").lower() or "wav"
     return path.read_bytes(), audio_format
+
+
+def _validate_reference_audio_duration(audio_path: str) -> None:
+    import soundfile as sf
+
+    info = sf.info(audio_path)
+    duration_seconds = float(info.frames) / float(info.samplerate)
+    if duration_seconds > MAX_REFERENCE_AUDIO_SECONDS:
+        raise ValueError(
+            f"参考音频太长了，请上传不超过 {int(MAX_REFERENCE_AUDIO_SECONDS)} 秒的音频。"
+        )
+
+
+def _prepare_audio_for_encoding(
+    audio_path: Optional[str], *, denoise: bool
+) -> tuple[bytes | None, str | None, Optional[str]]:
+    if audio_path is None or not audio_path.strip():
+        return None, None, None
+
+    _validate_reference_audio_duration(audio_path)
+
+    source_path = audio_path
+    temp_path = None
+    if denoise:
+        logger.info("Applying ZipEnhancer denoising to reference audio ...")
+        try:
+            temp_path = get_denoiser().enhance(audio_path)
+            source_path = temp_path
+        except Exception as exc:
+            raise RuntimeError(f"ZipEnhancer denoising failed: {exc}") from exc
+
+    audio_bytes, audio_format = _read_audio_bytes(source_path)
+    return audio_bytes, audio_format, temp_path
 
 
 def _safe_prompt_wav_recognition(use_prompt_text: bool, prompt_wav: Optional[str]) -> str:
@@ -378,11 +481,15 @@ def get_asr_model():
     global _asr_model
     if _asr_model is None:
         from funasr import AutoModel
+        from huggingface_hub import snapshot_download
 
         device = os.environ.get("ASR_DEVICE", "cpu").strip() or "cpu"
+        asr_model_ref = _resolve_asr_model_ref()
+        logger.info(f"Downloading ASR model from Hugging Face: {asr_model_ref}")
+        asr_model_path = snapshot_download(repo_id=asr_model_ref)
         logger.info(f"Loading ASR model on {device} ...")
         _asr_model = AutoModel(
-            model="iic/SenseVoiceSmall",
+            model=asr_model_path,
             disable_update=True,
             log_level="INFO",
             device=device,
@@ -491,68 +598,79 @@ def _generate_tts_audio_once(
     denoise: bool = True,
     inference_timesteps: int = 10,
 ) -> Tuple[int, np.ndarray]:
-    timesteps = int(inference_timesteps)
-    server = get_voxcpm_server(timesteps)
-    model_info = get_model_info(timesteps)
+    temp_audio_path = None
+    try:
+        timesteps = int(inference_timesteps)
+        server = get_voxcpm_server(timesteps)
+        model_info = get_model_info(timesteps)
 
-    text = (text_input or "").strip()
-    if len(text) == 0:
-        raise ValueError("Please input text to synthesize.")
+        text = (text_input or "").strip()
+        if len(text) == 0:
+            raise ValueError("Please input text to synthesize.")
 
-    control = (control_instruction or "").strip()
-    final_text = f"({control}){text}" if control and not use_prompt_text else text
+        control = (control_instruction or "").strip()
+        final_text = f"({control}){text}" if control and not use_prompt_text else text
 
-    audio_bytes, audio_format = _read_audio_bytes(reference_wav_path_input)
-    prompt_text_clean = (prompt_text_input or "").strip()
-    if use_prompt_text and audio_bytes is None:
-        raise ValueError("Ultimate Cloning Mode requires a reference audio clip.")
-    if use_prompt_text and not prompt_text_clean:
-        raise ValueError(
-            "Ultimate Cloning Mode requires a transcript. Please wait for ASR or fill it in manually."
+        audio_bytes, audio_format, temp_audio_path = _prepare_audio_for_encoding(
+            reference_wav_path_input,
+            denoise=bool(denoise),
         )
-    if not use_prompt_text:
-        prompt_text_clean = ""
+        prompt_text_clean = (prompt_text_input or "").strip()
+        if use_prompt_text and audio_bytes is None:
+            raise ValueError("Ultimate Cloning Mode requires a reference audio clip.")
+        if use_prompt_text and not prompt_text_clean:
+            raise ValueError(
+                "Ultimate Cloning Mode requires a transcript. Please wait for ASR or fill it in manually."
+            )
+        if not use_prompt_text:
+            prompt_text_clean = ""
 
-    if do_normalize:
-        logger.info("Ignoring normalize option: nano-vLLM backend does not support per-request text normalization.")
-    if denoise:
-        logger.info("Ignoring denoise option: nano-vLLM backend does not support per-request reference denoising.")
+        if do_normalize:
+            logger.info(
+                "Ignoring normalize option: nano-vLLM backend does not support per-request text normalization."
+            )
 
-    prompt_latents = None
-    ref_audio_latents = None
-    if audio_bytes is not None and audio_format is not None and use_prompt_text:
-        logger.info(f"[Ultimate Cloning] encoding prompt audio as {audio_format}")
-        prompt_latents = server.encode_latents(audio_bytes, audio_format)
-    elif audio_bytes is not None and audio_format is not None:
-        logger.info(f"[Controllable Cloning] encoding reference audio as {audio_format}")
-        ref_audio_latents = server.encode_latents(audio_bytes, audio_format)
+        prompt_latents = None
+        ref_audio_latents = None
+        if audio_bytes is not None and audio_format is not None and use_prompt_text:
+            logger.info(f"[Ultimate Cloning] encoding prompt audio as {audio_format}")
+            prompt_latents = server.encode_latents(audio_bytes, audio_format)
+        elif audio_bytes is not None and audio_format is not None:
+            logger.info(f"[Controllable Cloning] encoding reference audio as {audio_format}")
+            ref_audio_latents = server.encode_latents(audio_bytes, audio_format)
 
-    if prompt_latents is not None:
-        logger.info("[Ultimate Cloning] reference audio + transcript")
-    elif ref_audio_latents is not None:
-        logger.info("[Controllable Cloning] reference audio only")
-    else:
-        logger.info(f"[Voice Design] control: {control[:50] if control else 'None'}")
+        if prompt_latents is not None:
+            logger.info("[Ultimate Cloning] reference audio + transcript")
+        elif ref_audio_latents is not None:
+            logger.info("[Controllable Cloning] reference audio only")
+        else:
+            logger.info(f"[Voice Design] control: {control[:50] if control else 'None'}")
 
-    chunks: list[np.ndarray] = []
-    logger.info(f"Generating: '{final_text[:80]}...'")
-    for chunk in server.generate(
-        target_text=final_text,
-        prompt_latents=prompt_latents,
-        prompt_text=prompt_text_clean if prompt_latents is not None else "",
-        max_generate_length=_get_int_env("NANOVLLM_MAX_GENERATE_LENGTH", 2000),
-        temperature=_get_float_env("NANOVLLM_TEMPERATURE", 1.0),
-        cfg_value=float(cfg_value_input),
-        ref_audio_latents=ref_audio_latents,
-    ):
-        chunks.append(chunk)
+        chunks: list[np.ndarray] = []
+        logger.info(f"Generating: '{final_text[:80]}...'")
+        for chunk in server.generate(
+            target_text=final_text,
+            prompt_latents=prompt_latents,
+            prompt_text=prompt_text_clean if prompt_latents is not None else "",
+            max_generate_length=_get_int_env("NANOVLLM_MAX_GENERATE_LENGTH", 2000),
+            temperature=_get_float_env("NANOVLLM_TEMPERATURE", 1.0),
+            cfg_value=float(cfg_value_input),
+            ref_audio_latents=ref_audio_latents,
+        ):
+            chunks.append(chunk)
 
-    if not chunks:
-        raise RuntimeError("The model returned no audio chunks.")
+        if not chunks:
+            raise RuntimeError("The model returned no audio chunks.")
 
-    wav = np.concatenate(chunks, axis=0).astype(np.float32, copy=False)
-    wav = _float_audio_to_int16(wav)
-    return (int(model_info["sample_rate"]), wav)
+        wav = np.concatenate(chunks, axis=0).astype(np.float32, copy=False)
+        wav = _float_audio_to_int16(wav)
+        return (int(model_info["sample_rate"]), wav)
+    finally:
+        if temp_audio_path and os.path.exists(temp_audio_path):
+            try:
+                os.unlink(temp_audio_path)
+            except OSError:
+                pass
 
 
 def generate_tts_audio(
