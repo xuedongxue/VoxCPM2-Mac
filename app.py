@@ -221,24 +221,24 @@ def _read_audio_bytes(audio_path: Optional[str]) -> tuple[bytes | None, str | No
     return path.read_bytes(), audio_format
 
 
-def _validate_reference_audio_duration(audio_path: str) -> None:
+def _validate_reference_audio_duration(
+    audio_path: str, request: Optional[gr.Request] = None
+) -> None:
     import soundfile as sf
 
     info = sf.info(audio_path)
     duration_seconds = float(info.frames) / float(info.samplerate)
     if duration_seconds > MAX_REFERENCE_AUDIO_SECONDS:
-        raise ValueError(
-            f"参考音频太长了，请上传不超过 {int(MAX_REFERENCE_AUDIO_SECONDS)} 秒的音频。"
-        )
+        raise gr.Error(_get_i18n_text("reference_audio_too_long_error", request))
 
 
 def _prepare_audio_for_encoding(
-    audio_path: Optional[str], *, denoise: bool
+    audio_path: Optional[str], *, denoise: bool, request: Optional[gr.Request] = None
 ) -> tuple[bytes | None, str | None, Optional[str]]:
     if audio_path is None or not audio_path.strip():
         return None, None, None
 
-    _validate_reference_audio_duration(audio_path)
+    _validate_reference_audio_duration(audio_path, request)
 
     source_path = audio_path
     temp_path = None
@@ -260,6 +260,15 @@ def _safe_prompt_wav_recognition(use_prompt_text: bool, prompt_wav: Optional[str
     except Exception as exc:
         logger.warning(f"ASR recognition failed: {exc}")
         return ""
+
+
+def _validate_reference_audio_upload(
+    audio_path: Optional[str], request: gr.Request
+) -> Optional[str]:
+    if audio_path is None or not audio_path.strip():
+        return audio_path
+    _validate_reference_audio_duration(audio_path, request)
+    return audio_path
 
 
 def _stop_server_if_needed() -> None:
@@ -376,6 +385,7 @@ _I18N_TRANSLATIONS = {
         "cfg_info": "Higher → closer to the prompt / reference; lower → more creative variation",
         "dit_steps_label": "LocDiT flow-matching steps",
         "dit_steps_info": "LocDiT flow-matching steps — more steps → maybe better audio quality, but slower",
+        "reference_audio_too_long_error": "Reference audio is too long. Please upload audio no longer than 50 seconds.",
         "usage_instructions": _USAGE_INSTRUCTIONS_EN,
         "examples_footer": _EXAMPLES_FOOTER_EN,
     },
@@ -399,6 +409,7 @@ _I18N_TRANSLATIONS = {
         "cfg_info": "数值越高 → 越贴合提示/参考音色；数值越低 → 生成风格更自由",
         "dit_steps_label": "LocDiT 流匹配迭代步数",
         "dit_steps_info": "LocDiT 流匹配生成迭代步数 — 步数越多 → 可能生成更好的音频质量，但速度变慢",
+        "reference_audio_too_long_error": "参考音频太长了，请上传不超过 50 秒的音频。",
         "usage_instructions": _USAGE_INSTRUCTIONS_ZH,
         "examples_footer": _EXAMPLES_FOOTER_ZH,
     },
@@ -414,6 +425,22 @@ for _d in _I18N_TRANSLATIONS.values():
             _d.setdefault(_k, _v)
 
 I18N = gr.I18n(**_I18N_TRANSLATIONS)
+
+
+def _resolve_ui_language(request: Optional[gr.Request] = None) -> str:
+    if request is None:
+        return "en"
+    accept_language = str(request.headers.get("accept-language", "")).lower()
+    if accept_language.startswith("zh"):
+        return "zh-CN"
+    return "en"
+
+
+def _get_i18n_text(key: str, request: Optional[gr.Request] = None) -> str:
+    locale = _resolve_ui_language(request)
+    return _I18N_TRANSLATIONS.get(locale, _I18N_TRANSLATIONS["en"]).get(
+        key, _I18N_TRANSLATIONS["en"].get(key, key)
+    )
 
 DEFAULT_TARGET_TEXT = (
     "VoxCPM2 is a creative multilingual TTS model from ModelBest, "
@@ -597,6 +624,7 @@ def _generate_tts_audio_once(
     do_normalize: bool = True,
     denoise: bool = True,
     inference_timesteps: int = 10,
+    request: Optional[gr.Request] = None,
 ) -> Tuple[int, np.ndarray]:
     temp_audio_path = None
     try:
@@ -614,6 +642,7 @@ def _generate_tts_audio_once(
         audio_bytes, audio_format, temp_audio_path = _prepare_audio_for_encoding(
             reference_wav_path_input,
             denoise=bool(denoise),
+            request=request,
         )
         prompt_text_clean = (prompt_text_input or "").strip()
         if use_prompt_text and audio_bytes is None:
@@ -683,6 +712,7 @@ def generate_tts_audio(
     do_normalize: bool = True,
     denoise: bool = True,
     inference_timesteps: int = 10,
+    request: Optional[gr.Request] = None,
 ) -> Tuple[int, np.ndarray]:
     try:
         return _generate_tts_audio_once(
@@ -695,6 +725,7 @@ def generate_tts_audio(
             do_normalize=do_normalize,
             denoise=denoise,
             inference_timesteps=inference_timesteps,
+            request=request,
         )
     except ValueError:
         raise
@@ -712,6 +743,7 @@ def generate_tts_audio(
             do_normalize=do_normalize,
             denoise=denoise,
             inference_timesteps=inference_timesteps,
+            request=request,
         )
 
 
@@ -819,6 +851,13 @@ def create_demo_interface():
             with gr.Column():
                 audio_output = gr.Audio(label=I18N("generated_audio_label"))
                 gr.Markdown(I18N("examples_footer"))
+
+        reference_wav.change(
+            fn=_validate_reference_audio_upload,
+            inputs=[reference_wav],
+            outputs=[reference_wav],
+            show_progress=False,
+        )
 
         show_prompt_text.change(
             fn=_on_toggle_instant,
