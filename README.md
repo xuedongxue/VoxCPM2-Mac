@@ -22,8 +22,8 @@ Notes:
 - `flash-attn` and `nanovllm-voxcpm` are pinned in `requirements.txt`, so they install during Space build instead of on first request.
 - ZipEnhancer denoising is supported for reference audio cloning. The default denoiser model is `iic/speech_zipenhancer_ans_multiloss_16k_base`.
 - The Space now defaults to a hardened runtime path:
-  - If `/data` exists, Hugging Face cache, pip cache, and Gradio temp files are stored there automatically.
-  - If `/data` exists, ModelScope cache is also persisted there for ZipEnhancer downloads.
+  - If `/data` exists, request logs are written to daily JSONL files like `/data/logs/2026-04-05.jsonl`.
+  - Model, pip, and temporary caches now stay on the default runtime paths instead of consuming persistent storage.
   - Backend prewarm is enabled by default, so startup can begin dependency install + model load in the background.
   - Gradio SSR is disabled by default for stability.
 - The first cold start may still spend extra time installing dependencies, downloading the model, and loading the server.
@@ -59,7 +59,7 @@ Recommended environment variables:
 - `NANOVLLM_SERVERPOOL_DEVICES`: defaults to `0`
 - `NANOVLLM_MAX_GENERATE_LENGTH`: defaults to `2000`
 - `NANOVLLM_TEMPERATURE`: defaults to `1.0`
-- `MODELSCOPE_CACHE`: optional persistent cache path for ZipEnhancer downloads
+- `REQUEST_LOG_DIR`: optional persistent request log directory. Defaults to `/data/logs` when `/data` exists
 - `GRADIO_QUEUE_MAX_SIZE`: defaults to `10`
 - `GRADIO_DEFAULT_CONCURRENCY_LIMIT`: defaults to `1`
 - `GRADIO_SSR_MODE`: defaults to `false`

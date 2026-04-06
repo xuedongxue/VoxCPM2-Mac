@@ -1,8 +1,10 @@
 import atexit
+import json
 import logging
 import os
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock, Thread
 from typing import Optional, Tuple
@@ -32,35 +34,25 @@ logger = logging.getLogger(__name__)
 DEFAULT_ASR_MODEL_REF = "FunAudioLLM/SenseVoiceSmall"
 DEFAULT_ZIPENHANCER_MODEL = "iic/speech_zipenhancer_ans_multiloss_16k_base"
 MAX_REFERENCE_AUDIO_SECONDS = 50.0
+_persistent_root = None
+_request_log_dir = None
 
 
 def _configure_cache_dirs() -> None:
+    global _persistent_root, _request_log_dir
     persistent_root = Path(os.environ.get("SPACE_PERSISTENT_ROOT", "/data")).expanduser()
     if not persistent_root.exists():
+        logger.info("Persistent storage not detected. Request logs disabled.")
         return
 
-    cache_root = Path(
-        os.environ.get("VoxCPM_CACHE_ROOT", str(persistent_root / ".cache"))
+    logs_dir = Path(
+        os.environ.get("REQUEST_LOG_DIR", str(persistent_root / "logs"))
     ).expanduser()
-    hf_home = Path(os.environ.get("HF_HOME", str(persistent_root / ".huggingface"))).expanduser()
-    gradio_tmp = Path(
-        os.environ.get("GRADIO_TEMP_DIR", str(cache_root / "gradio"))
-    ).expanduser()
-    pip_cache = Path(os.environ.get("PIP_CACHE_DIR", str(cache_root / "pip"))).expanduser()
-    modelscope_cache = Path(
-        os.environ.get("MODELSCOPE_CACHE", str(cache_root / "modelscope"))
-    ).expanduser()
-
-    for path in (cache_root, hf_home, gradio_tmp, pip_cache, modelscope_cache):
-        path.mkdir(parents=True, exist_ok=True)
-
-    os.environ.setdefault("XDG_CACHE_HOME", str(cache_root))
-    os.environ.setdefault("HF_HOME", str(hf_home))
-    os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(hf_home / "hub"))
-    os.environ.setdefault("PIP_CACHE_DIR", str(pip_cache))
-    os.environ.setdefault("GRADIO_TEMP_DIR", str(gradio_tmp))
-    os.environ.setdefault("MODELSCOPE_CACHE", str(modelscope_cache))
-    logger.info(f"Using persistent cache directories under {persistent_root}")
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    _persistent_root = persistent_root
+    _request_log_dir = logs_dir
+    logger.info(f"Persistent storage detected at {persistent_root}")
+    logger.info(f"Request logs will be written to daily files under {_request_log_dir}")
 
 
 _configure_cache_dirs()
@@ -221,13 +213,17 @@ def _read_audio_bytes(audio_path: Optional[str]) -> tuple[bytes | None, str | No
     return path.read_bytes(), audio_format
 
 
-def _validate_reference_audio_duration(
-    audio_path: str, request: Optional[gr.Request] = None
-) -> None:
+def _get_audio_duration_seconds(audio_path: str) -> float:
     import soundfile as sf
 
     info = sf.info(audio_path)
-    duration_seconds = float(info.frames) / float(info.samplerate)
+    return float(info.frames) / float(info.samplerate)
+
+
+def _validate_reference_audio_duration(
+    audio_path: str, request: Optional[gr.Request] = None
+) -> None:
+    duration_seconds = _get_audio_duration_seconds(audio_path)
     if duration_seconds > MAX_REFERENCE_AUDIO_SECONDS:
         raise gr.Error(_get_i18n_text("reference_audio_too_long_error", request))
 
@@ -441,6 +437,17 @@ def _get_i18n_text(key: str, request: Optional[gr.Request] = None) -> str:
     return _I18N_TRANSLATIONS.get(locale, _I18N_TRANSLATIONS["en"]).get(
         key, _I18N_TRANSLATIONS["en"].get(key, key)
     )
+
+
+def _append_request_log(payload: dict) -> None:
+    if _request_log_dir is None:
+        return
+
+    now = datetime.now(timezone.utc)
+    record = {"timestamp": now.isoformat(), **payload}
+    log_path = _request_log_dir / f"{now.date().isoformat()}.jsonl"
+    with log_path.open("a", encoding="utf-8") as fp:
+        fp.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 DEFAULT_TARGET_TEXT = (
     "VoxCPM2 is a creative multilingual TTS model from ModelBest, "
@@ -714,8 +721,29 @@ def generate_tts_audio(
     inference_timesteps: int = 10,
     request: Optional[gr.Request] = None,
 ) -> Tuple[int, np.ndarray]:
+    request_payload = {
+        "event": "tts_request",
+        "ui_language": _resolve_ui_language(request),
+        "text": (text_input or "").strip(),
+        "control_instruction": (control_instruction or "").strip(),
+        "use_prompt_text": bool(use_prompt_text),
+        "prompt_text": (prompt_text_input or "").strip(),
+        "cfg_value": float(cfg_value_input),
+        "do_normalize": bool(do_normalize),
+        "denoise": bool(denoise),
+        "inference_timesteps": int(inference_timesteps),
+        "has_reference_audio": bool(reference_wav_path_input and reference_wav_path_input.strip()),
+    }
+    if request_payload["has_reference_audio"]:
+        try:
+            request_payload["reference_audio_duration_seconds"] = round(
+                _get_audio_duration_seconds(reference_wav_path_input), 3
+            )
+        except Exception as exc:
+            request_payload["reference_audio_duration_error"] = str(exc)
+
     try:
-        return _generate_tts_audio_once(
+        result = _generate_tts_audio_once(
             text_input=text_input,
             control_instruction=control_instruction,
             reference_wav_path_input=reference_wav_path_input,
@@ -727,13 +755,22 @@ def generate_tts_audio(
             inference_timesteps=inference_timesteps,
             request=request,
         )
+        try:
+            _append_request_log({**request_payload, "status": "success"})
+        except Exception as exc:
+            logger.warning(f"Failed to append request log: {exc}")
+        return result
     except ValueError:
         raise
     except Exception as exc:
+        try:
+            _append_request_log({**request_payload, "status": "error", "error": str(exc)})
+        except Exception as log_exc:
+            logger.warning(f"Failed to append request log: {log_exc}")
         logger.warning(f"Generation failed, restarting backend and retrying once: {exc}")
         with _server_lock:
             _stop_server_if_needed()
-        return _generate_tts_audio_once(
+        result = _generate_tts_audio_once(
             text_input=text_input,
             control_instruction=control_instruction,
             reference_wav_path_input=reference_wav_path_input,
@@ -745,6 +782,11 @@ def generate_tts_audio(
             inference_timesteps=inference_timesteps,
             request=request,
         )
+        try:
+            _append_request_log({**request_payload, "status": "success_after_retry"})
+        except Exception as log_exc:
+            logger.warning(f"Failed to append request log: {log_exc}")
+        return result
 
 
 # ---------- UI ----------
