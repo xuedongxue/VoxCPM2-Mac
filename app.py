@@ -300,7 +300,8 @@ _USAGE_INSTRUCTIONS_EN = (
     "🎙️ **Ultimate Cloning** — Reproduce every vocal nuance through audio continuation  \n"
     "Turn on **Ultimate Cloning Mode** and provide (or auto-transcribe) the reference audio's transcript. "
     "The model treats the reference clip as a spoken prefix and seamlessly **continues** from it, faithfully preserving every vocal detail."
-    "Note: This mode will disable Control Instruction."
+    "Note: This mode will disable Control Instruction.\n\n"
+    "### [A Voice Chef's Guide to VoxCPM2](https://voxcpm.readthedocs.io/en/latest/cookbook.html)"
 )
 
 _EXAMPLES_FOOTER_EN = (
@@ -331,6 +332,7 @@ _USAGE_INSTRUCTIONS_ZH = (
     "开启 **极致克隆模式** 并提供参考音频的文字内容（可自动识别）。"
     "模型会将参考音频视为已说出的前文，以**音频续写**的方式完整还原参考音频中的所有声音细节。"
     "注意：该模式与可控克隆模式互斥，将禁用Control Instruction。\n\n"
+    "### [VoxCPM 2 最佳实践指南](https://voxcpm.readthedocs.io/en/latest/cookbook.html)\n\n"
 )
 
 _EXAMPLES_FOOTER_ZH = (
