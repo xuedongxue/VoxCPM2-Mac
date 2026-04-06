@@ -9,6 +9,9 @@ triton==3.1.0
 flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.5cxx11abiFALSE-cp310-cp310-linux_x86_64.whl
 nano-vllm-voxcpm @ git+https://github.com/a710128/nanovllm-voxcpm.git@49e8bc25e93e33dda4decf0b6775b44ff6bb8bcc
 transformers>=4.51.0
+addict
+simplejson
+sortedcontainers
 xxhash
 tqdm
 librosa
