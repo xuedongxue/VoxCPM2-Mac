@@ -60,7 +60,6 @@ _configure_cache_dirs()
 _asr_model = None
 _voxcpm_server = None
 _model_info = None
-_server_inference_timesteps = None
 _denoiser = None
 _server_lock = Lock()
 _prewarm_lock = Lock()
@@ -100,9 +99,6 @@ def _get_devices_env() -> list[int]:
     if not values:
         return [0]
     return [int(part) for part in values]
-
-
-DEFAULT_INFERENCE_TIMESTEPS = _get_int_env("NANOVLLM_INFERENCE_TIMESTEPS", 10)
 
 
 def _resolve_model_ref() -> str:
@@ -258,17 +254,10 @@ def _safe_prompt_wav_recognition(use_prompt_text: bool, prompt_wav: Optional[str
         return ""
 
 
-def _validate_reference_audio_upload(
-    audio_path: Optional[str], request: gr.Request
-) -> Optional[str]:
-    if audio_path is None or not audio_path.strip():
-        return audio_path
-    _validate_reference_audio_duration(audio_path, request)
-    return audio_path
 
 
 def _stop_server_if_needed() -> None:
-    global _voxcpm_server, _model_info, _server_inference_timesteps
+    global _voxcpm_server, _model_info
     if _voxcpm_server is None:
         return
 
@@ -281,7 +270,6 @@ def _stop_server_if_needed() -> None:
 
     _voxcpm_server = None
     _model_info = None
-    _server_inference_timesteps = None
 
 
 atexit.register(_stop_server_if_needed)
@@ -381,8 +369,6 @@ _I18N_TRANSLATIONS = {
         "normalize_info": "Normalize numbers, dates, and abbreviations via wetext",
         "cfg_label": "CFG (guidance scale)",
         "cfg_info": "Higher → closer to the prompt / reference; lower → more creative variation",
-        "dit_steps_label": "LocDiT flow-matching steps",
-        "dit_steps_info": "LocDiT flow-matching steps — more steps → maybe better audio quality, but slower",
         "reference_audio_too_long_error": "Reference audio is too long. Please upload audio no longer than 50 seconds.",
         "usage_instructions": _USAGE_INSTRUCTIONS_EN,
         "examples_footer": _EXAMPLES_FOOTER_EN,
@@ -405,8 +391,6 @@ _I18N_TRANSLATIONS = {
         "normalize_info": "自动规范化数字、日期及缩写（基于 wetext）",
         "cfg_label": "CFG（引导强度）",
         "cfg_info": "数值越高 → 越贴合提示/参考音色；数值越低 → 生成风格更自由",
-        "dit_steps_label": "LocDiT 流匹配迭代步数",
-        "dit_steps_info": "LocDiT 流匹配生成迭代步数 — 步数越多 → 可能生成更好的音频质量，但速度变慢",
         "reference_audio_too_long_error": "参考音频太长了，请上传不超过 50 秒的音频。",
         "usage_instructions": _USAGE_INSTRUCTIONS_ZH,
         "examples_footer": _EXAMPLES_FOOTER_ZH,
@@ -534,33 +518,22 @@ def get_asr_model():
     return _asr_model
 
 
-def get_voxcpm_server(inference_timesteps: int):
-    global _voxcpm_server, _model_info, _server_inference_timesteps
-    if _voxcpm_server is not None and _server_inference_timesteps == inference_timesteps:
+def get_voxcpm_server():
+    global _voxcpm_server, _model_info
+    if _voxcpm_server is not None:
         return _voxcpm_server
 
     with _server_lock:
-        if _voxcpm_server is not None and _server_inference_timesteps == inference_timesteps:
+        if _voxcpm_server is not None:
             return _voxcpm_server
-
-        if _voxcpm_server is not None and _server_inference_timesteps != inference_timesteps:
-            logger.info(
-                f"Rebuilding nano-vLLM server for inference_timesteps={inference_timesteps} "
-                f"(previous={_server_inference_timesteps})"
-            )
-            _stop_server_if_needed()
 
         _log_runtime_diagnostics_once()
         from nanovllm_voxcpm import VoxCPM
 
         model_ref = _resolve_model_ref()
-        logger.info(
-            f"Loading nano-vLLM VoxCPM server from {model_ref} "
-            f"with inference_timesteps={inference_timesteps} ..."
-        )
+        logger.info(f"Loading nano-vLLM VoxCPM server from {model_ref} ...")
         _voxcpm_server = VoxCPM.from_pretrained(
             model=model_ref,
-            inference_timesteps=int(inference_timesteps),
             max_num_batched_tokens=_get_int_env("NANOVLLM_SERVERPOOL_MAX_NUM_BATCHED_TOKENS", 8192),
             max_num_seqs=_get_int_env("NANOVLLM_SERVERPOOL_MAX_NUM_SEQS", 16),
             max_model_len=_get_int_env("NANOVLLM_SERVERPOOL_MAX_MODEL_LEN", 4096),
@@ -569,25 +542,22 @@ def get_voxcpm_server(inference_timesteps: int):
             devices=_get_devices_env(),
         )
         _model_info = _voxcpm_server.get_model_info()
-        _server_inference_timesteps = inference_timesteps
         logger.info(f"nano-vLLM VoxCPM server loaded: {_model_info}")
     return _voxcpm_server
 
 
-def get_model_info(inference_timesteps: int) -> dict:
+def get_model_info() -> dict:
     global _model_info
-    if _model_info is None or _server_inference_timesteps != inference_timesteps:
-        get_voxcpm_server(inference_timesteps)
+    if _model_info is None:
+        get_voxcpm_server()
     assert _model_info is not None
     return _model_info
 
 
 def _prewarm_backend() -> None:
     try:
-        logger.info(
-            f"Starting backend prewarm with inference_timesteps={DEFAULT_INFERENCE_TIMESTEPS} ..."
-        )
-        get_voxcpm_server(DEFAULT_INFERENCE_TIMESTEPS)
+        logger.info("Starting backend prewarm ...")
+        get_voxcpm_server()
         logger.info("Backend prewarm completed.")
     except Exception as exc:
         logger.warning(f"Backend prewarm failed: {exc}")
@@ -632,14 +602,12 @@ def _generate_tts_audio_once(
     cfg_value_input: float = 2.0,
     do_normalize: bool = True,
     denoise: bool = True,
-    inference_timesteps: int = 10,
     request: Optional[gr.Request] = None,
 ) -> Tuple[int, np.ndarray]:
     temp_audio_path = None
     try:
-        timesteps = int(inference_timesteps)
-        server = get_voxcpm_server(timesteps)
-        model_info = get_model_info(timesteps)
+        server = get_voxcpm_server()
+        model_info = get_model_info()
 
         text = (text_input or "").strip()
         if len(text) == 0:
@@ -720,7 +688,6 @@ def generate_tts_audio(
     cfg_value_input: float = 2.0,
     do_normalize: bool = True,
     denoise: bool = True,
-    inference_timesteps: int = 10,
     request: Optional[gr.Request] = None,
 ) -> Tuple[int, np.ndarray]:
     request_payload = {
@@ -733,7 +700,6 @@ def generate_tts_audio(
         "cfg_value": float(cfg_value_input),
         "do_normalize": bool(do_normalize),
         "denoise": bool(denoise),
-        "inference_timesteps": int(inference_timesteps),
         "has_reference_audio": bool(reference_wav_path_input and reference_wav_path_input.strip()),
     }
     if request_payload["has_reference_audio"]:
@@ -754,7 +720,6 @@ def generate_tts_audio(
             cfg_value_input=cfg_value_input,
             do_normalize=do_normalize,
             denoise=denoise,
-            inference_timesteps=inference_timesteps,
             request=request,
         )
         try:
@@ -781,7 +746,6 @@ def generate_tts_audio(
             cfg_value_input=cfg_value_input,
             do_normalize=do_normalize,
             denoise=denoise,
-            inference_timesteps=inference_timesteps,
             request=request,
         )
         try:
@@ -881,27 +845,11 @@ def create_demo_interface():
                         label=I18N("cfg_label"),
                         info=I18N("cfg_info"),
                     )
-                    dit_steps = gr.Slider(
-                        minimum=1,
-                        maximum=50,
-                        value=DEFAULT_INFERENCE_TIMESTEPS,
-                        step=1,
-                        label=I18N("dit_steps_label"),
-                        info=I18N("dit_steps_info"),
-                    )
-
                 run_btn = gr.Button(I18N("generate_btn"), variant="primary", size="lg")
 
             with gr.Column():
                 audio_output = gr.Audio(label=I18N("generated_audio_label"))
                 gr.Markdown(I18N("examples_footer"))
-
-        reference_wav.change(
-            fn=_validate_reference_audio_upload,
-            inputs=[reference_wav],
-            outputs=[reference_wav],
-            show_progress=False,
-        )
 
         show_prompt_text.change(
             fn=_on_toggle_instant,
@@ -924,7 +872,6 @@ def create_demo_interface():
                 cfg_value,
                 DoNormalizeText,
                 DoDenoisePromptAudio,
-                dit_steps,
             ],
             outputs=[audio_output],
             show_progress=True,
