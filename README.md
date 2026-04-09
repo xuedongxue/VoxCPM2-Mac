@@ -61,5 +61,6 @@ Recommended environment variables:
 - `NANOVLLM_TEMPERATURE`: defaults to `1.0`
 - `REQUEST_LOG_DIR`: optional persistent request log directory. Defaults to `/data/logs` when `/data` exists
 - `GRADIO_QUEUE_MAX_SIZE`: defaults to `10`
-- `GRADIO_DEFAULT_CONCURRENCY_LIMIT`: defaults to `1` (nanovllm-voxcpm event loop is not thread-safe; do NOT increase)
+- `GRADIO_DEFAULT_CONCURRENCY_LIMIT`: defaults to `4` (uses async server pool bridge for thread-safe concurrency)
+- `DENOISE_MAX_CONCURRENT`: defaults to `1` (limits concurrent ZipEnhancer denoise requests to avoid GPU OOM)
 - `GRADIO_SSR_MODE`: defaults to `false`

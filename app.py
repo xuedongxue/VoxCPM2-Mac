@@ -1,12 +1,14 @@
+import asyncio
 import atexit
 import json
 import logging
 import os
+import queue
 import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import Lock, Thread
+from threading import Lock, Semaphore, Thread
 from typing import Optional, Tuple
 
 import gradio as gr
@@ -61,11 +63,15 @@ _asr_model = None
 _voxcpm_server = None
 _model_info = None
 _denoiser = None
+_asr_lock = Lock()
 _server_lock = Lock()
 _prewarm_lock = Lock()
 _denoiser_lock = Lock()
+_denoise_semaphore = Semaphore(int(os.environ.get("DENOISE_MAX_CONCURRENT", "1")))
 _prewarm_started = False
 _runtime_diag_logged = False
+_active_generation_requests = 0
+_active_generation_lock = Lock()
 
 
 def _get_int_env(name: str, default: int) -> int:
@@ -216,6 +222,23 @@ def _get_audio_duration_seconds(audio_path: str) -> float:
     return float(info.frames) / float(info.samplerate)
 
 
+def _begin_generation_request() -> None:
+    global _active_generation_requests
+    with _active_generation_lock:
+        _active_generation_requests += 1
+
+
+def _end_generation_request() -> None:
+    global _active_generation_requests
+    with _active_generation_lock:
+        _active_generation_requests = max(0, _active_generation_requests - 1)
+
+
+def _get_active_generation_requests() -> int:
+    with _active_generation_lock:
+        return _active_generation_requests
+
+
 def _validate_reference_audio_duration(
     audio_path: str, request: Optional[gr.Request] = None
 ) -> None:
@@ -225,7 +248,10 @@ def _validate_reference_audio_duration(
 
 
 def _prepare_audio_for_encoding(
-    audio_path: Optional[str], *, denoise: bool, request: Optional[gr.Request] = None
+    audio_path: Optional[str],
+    *,
+    denoise: bool,
+    request: Optional[gr.Request] = None,
 ) -> tuple[bytes | None, str | None, Optional[str]]:
     if audio_path is None or not audio_path.strip():
         return None, None, None
@@ -236,22 +262,30 @@ def _prepare_audio_for_encoding(
     temp_path = None
     if denoise:
         logger.info("Applying ZipEnhancer denoising to reference audio ...")
+        acquired = _denoise_semaphore.acquire(timeout=30)
+        if not acquired:
+            raise gr.Error(_get_i18n_text("denoise_busy_error", request))
         try:
             temp_path = get_denoiser().enhance(audio_path)
             source_path = temp_path
         except Exception as exc:
-            raise RuntimeError(f"ZipEnhancer denoising failed: {exc}") from exc
+            logger.exception("ZipEnhancer denoising failed")
+            raise gr.Error(_get_i18n_text("denoise_failed_error", request)) from exc
+        finally:
+            _denoise_semaphore.release()
 
     audio_bytes, audio_format = _read_audio_bytes(source_path)
     return audio_bytes, audio_format, temp_path
 
 
-def _safe_prompt_wav_recognition(use_prompt_text: bool, prompt_wav: Optional[str]) -> str:
+def _safe_prompt_wav_recognition(
+    use_prompt_text: bool, prompt_wav: Optional[str], request: Optional[gr.Request] = None
+) -> str:
     try:
         return prompt_wav_recognition(use_prompt_text, prompt_wav)
     except Exception as exc:
         logger.warning(f"ASR recognition failed: {exc}")
-        return ""
+        raise gr.Error(_get_i18n_text("asr_failed_error", request)) from exc
 
 
 
@@ -261,12 +295,15 @@ def _stop_server_if_needed() -> None:
     if _voxcpm_server is None:
         return
 
-    stop = getattr(_voxcpm_server, "stop", None)
-    if callable(stop):
-        try:
-            stop()
-        except Exception as exc:
-            logger.warning(f"Failed to stop nano-vLLM server cleanly: {exc}")
+    if isinstance(_voxcpm_server, _AsyncServerBridge):
+        _voxcpm_server.stop()
+    else:
+        stop = getattr(_voxcpm_server, "stop", None)
+        if callable(stop):
+            try:
+                stop()
+            except Exception as exc:
+                logger.warning(f"Failed to stop nano-vLLM server cleanly: {exc}")
 
     _voxcpm_server = None
     _model_info = None
@@ -370,6 +407,10 @@ _I18N_TRANSLATIONS = {
         "cfg_label": "CFG (guidance scale)",
         "cfg_info": "Higher → closer to the prompt / reference; lower → more creative variation",
         "reference_audio_too_long_error": "Reference audio is too long. Please upload audio no longer than 50 seconds.",
+        "denoise_busy_error": "Too many reference-audio enhancement requests are running. Please try again in a moment.",
+        "denoise_failed_error": "Reference audio enhancement failed. Please try disabling denoise or use a cleaner clip.",
+        "backend_retry_error": "The backend is temporarily unstable. Please try again in a moment.",
+        "asr_failed_error": "ASR failed. Please fill the transcript manually or try another reference audio.",
         "usage_instructions": _USAGE_INSTRUCTIONS_EN,
         "examples_footer": _EXAMPLES_FOOTER_EN,
     },
@@ -392,6 +433,10 @@ _I18N_TRANSLATIONS = {
         "cfg_label": "CFG（引导强度）",
         "cfg_info": "数值越高 → 越贴合提示/参考音色；数值越低 → 生成风格更自由",
         "reference_audio_too_long_error": "参考音频太长了，请上传不超过 50 秒的音频。",
+        "denoise_busy_error": "当前参考音频降噪请求过多，请稍后再试。",
+        "denoise_failed_error": "参考音频降噪失败，请尝试关闭降噪或更换更干净的音频。",
+        "backend_retry_error": "后端暂时不稳定，请稍后再试。",
+        "asr_failed_error": "ASR 识别失败，请手动填写参考音频文本，或更换一段参考音频后重试。",
         "usage_instructions": _USAGE_INSTRUCTIONS_ZH,
         "examples_footer": _EXAMPLES_FOOTER_ZH,
     },
@@ -499,7 +544,11 @@ _APP_THEME = gr.themes.Soft(
 
 def get_asr_model():
     global _asr_model
-    if _asr_model is None:
+    if _asr_model is not None:
+        return _asr_model
+    with _asr_lock:
+        if _asr_model is not None:
+            return _asr_model
         from funasr import AutoModel
         from huggingface_hub import snapshot_download
 
@@ -518,7 +567,142 @@ def get_asr_model():
     return _asr_model
 
 
-def get_voxcpm_server():
+class _AsyncServerBridge:
+    """Thread-safe bridge to AsyncVoxCPM2ServerPool running in a dedicated event loop."""
+
+    def __init__(self):
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._thread: Optional[Thread] = None
+        self._server_pool = None
+        self._model_info: Optional[dict] = None
+        self._closed = False
+
+    def _run_loop(self) -> None:
+        assert self._loop is not None
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_forever()
+
+    def start(self) -> None:
+        _log_runtime_diagnostics_once()
+        model_ref = _resolve_model_ref()
+        logger.info(f"Loading nano-vLLM VoxCPM async server from {model_ref} ...")
+
+        self._loop = asyncio.new_event_loop()
+        self._thread = Thread(target=self._run_loop, name="nanovllm-event-loop", daemon=True)
+        self._thread.start()
+
+        try:
+            async def _init():
+                from nanovllm_voxcpm import VoxCPM
+
+                pool = VoxCPM.from_pretrained(
+                    model=model_ref,
+                    max_num_batched_tokens=_get_int_env("NANOVLLM_SERVERPOOL_MAX_NUM_BATCHED_TOKENS", 8192),
+                    max_num_seqs=_get_int_env("NANOVLLM_SERVERPOOL_MAX_NUM_SEQS", 16),
+                    max_model_len=_get_int_env("NANOVLLM_SERVERPOOL_MAX_MODEL_LEN", 4096),
+                    gpu_memory_utilization=_get_float_env("NANOVLLM_SERVERPOOL_GPU_MEMORY_UTILIZATION", 0.95),
+                    enforce_eager=_get_bool_env("NANOVLLM_SERVERPOOL_ENFORCE_EAGER", False),
+                    devices=_get_devices_env(),
+                )
+                await pool.wait_for_ready()
+                return pool
+
+            future = asyncio.run_coroutine_threadsafe(_init(), self._loop)
+            self._server_pool = future.result()
+
+            info_future = asyncio.run_coroutine_threadsafe(
+                self._server_pool.get_model_info(), self._loop
+            )
+            self._model_info = info_future.result()
+            logger.info(f"nano-vLLM async server loaded: {self._model_info}")
+        except Exception:
+            self.stop()
+            raise
+
+    def get_model_info(self) -> dict:
+        assert self._model_info is not None
+        return self._model_info
+
+    def encode_latents(self, wav: bytes, wav_format: str, timeout: float = 120) -> bytes:
+        if self._closed:
+            raise RuntimeError("nano-vLLM bridge is closed")
+        assert self._loop is not None and self._server_pool is not None
+        future = asyncio.run_coroutine_threadsafe(
+            self._server_pool.encode_latents(wav, wav_format), self._loop
+        )
+        try:
+            return future.result(timeout=timeout)
+        finally:
+            if not future.done():
+                future.cancel()
+
+    def generate(self, timeout: float = 300, **kwargs):
+        if self._closed:
+            raise RuntimeError("nano-vLLM bridge is closed")
+        assert self._loop is not None and self._server_pool is not None
+        result_queue: queue.Queue = queue.Queue()
+        import time as _time
+
+        async def _drain():
+            try:
+                async for chunk in self._server_pool.generate(**kwargs):
+                    result_queue.put(chunk)
+                result_queue.put(None)
+            except Exception as exc:
+                result_queue.put(exc)
+
+        deadline = _time.monotonic() + timeout
+        future = asyncio.run_coroutine_threadsafe(_drain(), self._loop)
+        try:
+            while True:
+                remaining = deadline - _time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"Generation exceeded {timeout}s timeout")
+                try:
+                    item = result_queue.get(timeout=min(0.5, remaining))
+                except queue.Empty:
+                    if future.done():
+                        exc = future.exception()
+                        if exc is not None:
+                            raise exc
+                    continue
+                if item is None:
+                    break
+                if isinstance(item, Exception):
+                    raise item
+                yield item
+        finally:
+            if not future.done():
+                future.cancel()
+
+    def stop(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            if self._loop is not None and self._server_pool is not None:
+                future = asyncio.run_coroutine_threadsafe(self._server_pool.stop(), self._loop)
+                future.result(timeout=10)
+        except Exception as exc:
+            logger.warning(f"Failed to stop async server pool cleanly: {exc}")
+        finally:
+            if self._loop is not None:
+                self._loop.call_soon_threadsafe(self._loop.stop)
+            if self._thread is not None:
+                self._thread.join(timeout=5)
+            if (
+                self._loop is not None
+                and not self._loop.is_closed()
+                and (self._thread is None or not self._thread.is_alive())
+            ):
+                self._loop.close()
+            self._server_pool = None
+            self._model_info = None
+            self._thread = None
+            self._loop = None
+
+
+def get_voxcpm_server() -> _AsyncServerBridge:
     global _voxcpm_server, _model_info
     if _voxcpm_server is not None:
         return _voxcpm_server
@@ -527,22 +711,10 @@ def get_voxcpm_server():
         if _voxcpm_server is not None:
             return _voxcpm_server
 
-        _log_runtime_diagnostics_once()
-        from nanovllm_voxcpm import VoxCPM
-
-        model_ref = _resolve_model_ref()
-        logger.info(f"Loading nano-vLLM VoxCPM server from {model_ref} ...")
-        _voxcpm_server = VoxCPM.from_pretrained(
-            model=model_ref,
-            max_num_batched_tokens=_get_int_env("NANOVLLM_SERVERPOOL_MAX_NUM_BATCHED_TOKENS", 8192),
-            max_num_seqs=_get_int_env("NANOVLLM_SERVERPOOL_MAX_NUM_SEQS", 16),
-            max_model_len=_get_int_env("NANOVLLM_SERVERPOOL_MAX_MODEL_LEN", 4096),
-            gpu_memory_utilization=_get_float_env("NANOVLLM_SERVERPOOL_GPU_MEMORY_UTILIZATION", 0.95),
-            enforce_eager=_get_bool_env("NANOVLLM_SERVERPOOL_ENFORCE_EAGER", False),
-            devices=_get_devices_env(),
-        )
-        _model_info = _voxcpm_server.get_model_info()
-        logger.info(f"nano-vLLM VoxCPM server loaded: {_model_info}")
+        bridge = _AsyncServerBridge()
+        bridge.start()
+        _voxcpm_server = bridge
+        _model_info = bridge.get_model_info()
     return _voxcpm_server
 
 
@@ -690,6 +862,7 @@ def generate_tts_audio(
     denoise: bool = True,
     request: Optional[gr.Request] = None,
 ) -> Tuple[int, np.ndarray]:
+    _begin_generation_request()
     request_payload = {
         "event": "tts_request",
         "ui_language": _resolve_ui_language(request),
@@ -711,48 +884,80 @@ def generate_tts_audio(
             request_payload["reference_audio_duration_error"] = str(exc)
 
     try:
-        result = _generate_tts_audio_once(
-            text_input=text_input,
-            control_instruction=control_instruction,
-            reference_wav_path_input=reference_wav_path_input,
-            use_prompt_text=use_prompt_text,
-            prompt_text_input=prompt_text_input,
-            cfg_value_input=cfg_value_input,
-            do_normalize=do_normalize,
-            denoise=denoise,
-            request=request,
-        )
         try:
-            _append_request_log({**request_payload, "status": "success"})
+            result = _generate_tts_audio_once(
+                text_input=text_input,
+                control_instruction=control_instruction,
+                reference_wav_path_input=reference_wav_path_input,
+                use_prompt_text=use_prompt_text,
+                prompt_text_input=prompt_text_input,
+                cfg_value_input=cfg_value_input,
+                do_normalize=do_normalize,
+                denoise=denoise,
+                request=request,
+            )
+            try:
+                _append_request_log({**request_payload, "status": "success"})
+            except Exception as exc:
+                logger.warning(f"Failed to append request log: {exc}")
+            return result
+        except (ValueError, gr.Error) as exc:
+            try:
+                _append_request_log(
+                    {**request_payload, "status": "rejected", "error": str(exc)}
+                )
+            except Exception as log_exc:
+                logger.warning(f"Failed to append request log: {log_exc}")
+            if isinstance(exc, gr.Error):
+                raise
+            raise gr.Error(str(exc)) from exc
         except Exception as exc:
-            logger.warning(f"Failed to append request log: {exc}")
-        return result
-    except ValueError:
-        raise
-    except Exception as exc:
-        try:
-            _append_request_log({**request_payload, "status": "error", "error": str(exc)})
-        except Exception as log_exc:
-            logger.warning(f"Failed to append request log: {log_exc}")
-        logger.warning(f"Generation failed, restarting backend and retrying once: {exc}")
-        with _server_lock:
-            _stop_server_if_needed()
-        result = _generate_tts_audio_once(
-            text_input=text_input,
-            control_instruction=control_instruction,
-            reference_wav_path_input=reference_wav_path_input,
-            use_prompt_text=use_prompt_text,
-            prompt_text_input=prompt_text_input,
-            cfg_value_input=cfg_value_input,
-            do_normalize=do_normalize,
-            denoise=denoise,
-            request=request,
-        )
-        try:
-            _append_request_log({**request_payload, "status": "success_after_retry"})
-        except Exception as log_exc:
-            logger.warning(f"Failed to append request log: {log_exc}")
-        return result
+            logger.exception("Generation failed")
+            try:
+                _append_request_log({**request_payload, "status": "error", "error": str(exc)})
+            except Exception as log_exc:
+                logger.warning(f"Failed to append request log: {log_exc}")
+
+            active_requests = _get_active_generation_requests()
+            if active_requests > 1:
+                logger.warning(
+                    "Generation failed with %s active requests; skipping shared backend restart: %s",
+                    active_requests,
+                    exc,
+                )
+                raise gr.Error(_get_i18n_text("backend_retry_error", request)) from exc
+
+            logger.warning(f"Generation failed, restarting backend and retrying once: {exc}")
+            with _server_lock:
+                _stop_server_if_needed()
+            try:
+                result = _generate_tts_audio_once(
+                    text_input=text_input,
+                    control_instruction=control_instruction,
+                    reference_wav_path_input=reference_wav_path_input,
+                    use_prompt_text=use_prompt_text,
+                    prompt_text_input=prompt_text_input,
+                    cfg_value_input=cfg_value_input,
+                    do_normalize=do_normalize,
+                    denoise=denoise,
+                    request=request,
+                )
+                try:
+                    _append_request_log({**request_payload, "status": "success_after_retry"})
+                except Exception as log_exc:
+                    logger.warning(f"Failed to append request log: {log_exc}")
+                return result
+            except Exception as retry_exc:
+                logger.exception("Retry failed")
+                try:
+                    _append_request_log(
+                        {**request_payload, "status": "retry_failed", "error": str(retry_exc)}
+                    )
+                except Exception as log_exc:
+                    logger.warning(f"Failed to append request log: {log_exc}")
+                raise gr.Error(_get_i18n_text("backend_retry_error", request)) from retry_exc
+    finally:
+        _end_generation_request()
 
 
 # ---------- UI ----------
@@ -774,13 +979,16 @@ def create_demo_interface():
             gr.update(visible=True, interactive=True),
         )
 
-    def _run_asr_if_needed(checked, audio_path):
+    def _run_asr_if_needed(checked, audio_path, request: gr.Request = None):
         if not checked or not audio_path:
             return gr.update()
         logger.info("Running ASR on reference audio...")
-        asr_text = _safe_prompt_wav_recognition(True, audio_path)
+        asr_text = _safe_prompt_wav_recognition(True, audio_path, request=request)
         logger.info(f"ASR result: {asr_text[:60]}...")
-        return gr.update(value=asr_text)
+        return gr.update(
+            value=asr_text,
+            placeholder=_get_i18n_text("prompt_text_placeholder", request),
+        )
 
     with gr.Blocks() as interface:
         if (assets_dir / "voxcpm_logo.png").exists():
@@ -888,7 +1096,7 @@ def run_demo(
     _start_background_prewarm()
     interface.queue(
         max_size=_get_int_env("GRADIO_QUEUE_MAX_SIZE", 10),
-        default_concurrency_limit=_get_int_env("GRADIO_DEFAULT_CONCURRENCY_LIMIT", 1),
+        default_concurrency_limit=_get_int_env("GRADIO_DEFAULT_CONCURRENCY_LIMIT", 4),
     ).launch(
         server_name=server_name,
         server_port=int(os.environ.get("PORT", server_port)),
