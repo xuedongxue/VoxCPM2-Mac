@@ -4,63 +4,84 @@ emoji: 🎙️
 colorFrom: blue
 colorTo: indigo
 sdk: gradio
-sdk_version: 6.0.0
+sdk_version: 6.12.0
 app_file: app.py
 python_version: "3.10"
 pinned: true
 license: apache-2.0
-short_description: VoxCPM2 Nano-vLLM Demo
+short_description: VoxCPM2 Gradio Demo (Nano-vLLM on Linux / voxcpm on macOS)
 ---
 
-Experimental Gradio Space demo for `VoxCPM2` powered by `nanovllm-voxcpm`.
+# VoxCPM-Demo
 
-This repo keeps the existing Gradio frontend layout and swaps only the backend inference path to Nano-vLLM.
+基于 Gradio 的 [VoxCPM2](https://huggingface.co/openbmb/VoxCPM2) 演示：在 **Linux + NVIDIA GPU** 上使用 **nano-vLLM** 推理；在 **macOS** 上使用官方 **voxcpm**（PyTorch，支持 MPS/CPU）。
 
-Notes:
+## 本地使用
 
-- This is the non-Docker experiment path. It relies on a persistent GPU Gradio Space.
-- `flash-attn` and `nanovllm-voxcpm` are pinned in `requirements.txt`, so they install during Space build instead of on first request.
-- ZipEnhancer denoising is supported for reference audio cloning. The default denoiser model is `iic/speech_zipenhancer_ans_multiloss_16k_base`.
-- The Space now defaults to a hardened runtime path:
-  - If `/data` exists, request logs are written to daily JSONL files like `/data/logs/2026-04-05.jsonl`.
-  - Model, pip, and temporary caches now stay on the default runtime paths instead of consuming persistent storage.
-  - Backend prewarm is enabled by default, so startup can begin dependency install + model load in the background.
-  - Gradio SSR is disabled by default for stability.
-- The first cold start may still spend extra time installing dependencies, downloading the model, and loading the server.
-- `SenseVoiceSmall` is downloaded from Hugging Face and cached locally before ASR initialization.
-- `ASR_DEVICE` defaults to `cpu` to avoid competing with TTS GPU memory.
-- Reference audio longer than 50 seconds is rejected early before denoising or Nano-vLLM encoding.
-- The `LocDiT flow-matching steps` slider is wired to Nano-vLLM server `inference_timesteps`; changing it rebuilds the backend server.
-- The existing `normalize` toggle is kept for UI compatibility, but Nano-vLLM currently ignores it.
-- The existing `denoise` toggle now runs ZipEnhancer on the reference audio before encoding it to latents.
-- `packages.txt` is required because this path needs extra system build dependencies.
+### 环境
 
-Stability recommendation:
+- Python **3.10–3.12**
+- **macOS**：需安装 [FFmpeg](https://ffmpeg.org/)（例如 `brew install ffmpeg`），供 `torchcodec` / 音频处理使用。
 
-- Use a persistent GPU Space.
-- Attach persistent storage so `/data` is available.
-- Keep the default queue concurrency at `1` unless you have profiled GPU memory headroom.
+### 安装
 
-Recommended environment variables:
+```bash
+cd VoxCPM-Demo
+python3 -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -U pip
+pip install -r requirements.txt
+```
 
-- `HF_REPO_ID`: Hugging Face model repo id. Defaults to `openbmb/VoxCPM2`
-- `HF_TOKEN`: required if the model repo is private
-- `NANOVLLM_MODEL`: optional direct model ref override. Can be a local path or HF repo id
-- `NANOVLLM_MODEL_PATH`: optional local model path override
-- `ASR_DEVICE`: defaults to `cpu`
-- `ZIPENHANCER_MODEL_ID`: optional ModelScope denoiser model id or local path. Defaults to `iic/speech_zipenhancer_ans_multiloss_16k_base`
-- `NANOVLLM_INFERENCE_TIMESTEPS`: initial default is `10`
-- `NANOVLLM_PREWARM`: defaults to `true`
-- `NANOVLLM_SERVERPOOL_MAX_NUM_BATCHED_TOKENS`: defaults to `8192`
-- `NANOVLLM_SERVERPOOL_MAX_NUM_SEQS`: defaults to `16`
-- `NANOVLLM_SERVERPOOL_MAX_MODEL_LEN`: defaults to `4096`
-- `NANOVLLM_SERVERPOOL_GPU_MEMORY_UTILIZATION`: defaults to `0.95`
-- `NANOVLLM_SERVERPOOL_ENFORCE_EAGER`: defaults to `false`
-- `NANOVLLM_SERVERPOOL_DEVICES`: defaults to `0`
-- `NANOVLLM_MAX_GENERATE_LENGTH`: defaults to `2000`
-- `NANOVLLM_TEMPERATURE`: defaults to `1.0`
-- `REQUEST_LOG_DIR`: optional persistent request log directory. Defaults to `/data/logs` when `/data` exists
-- `GRADIO_QUEUE_MAX_SIZE`: defaults to `10`
-- `GRADIO_DEFAULT_CONCURRENCY_LIMIT`: defaults to `4` (uses async server pool bridge for thread-safe concurrency)
-- `DENOISE_MAX_CONCURRENT`: defaults to `1` (limits concurrent ZipEnhancer denoise requests to avoid GPU OOM)
-- `GRADIO_SSR_MODE`: defaults to `false`
+### 启动
+
+```bash
+python app.py
+```
+
+浏览器访问终端里提示的地址（默认 `http://127.0.0.1:7860`）。
+
+若直接用系统自带的 `python app.py` 而本机已存在项目下的 `.venv`，脚本会尝试自动改用 `.venv` 中的解释器（需已安装依赖）。
+
+## 模型放在哪里
+
+默认会从 Hugging Face 拉取 **`openbmb/VoxCPM2`**。若已下载到本地，**无需联网**，把**完整模型目录**（内含 `config.json`、`*.safetensors`、`audiovae.pth` 等）放到以下**任一**位置即可自动识别（在未设置 `HF_REPO_ID` / `NANOVLLM_MODEL_PATH` / `NANOVLLM_MODEL` 时生效）：
+
+| 位置 | 说明 |
+|------|------|
+| `<本仓库上一级>/models/openbmb__VoxCPM2/` | 例如与 `VoxCPM-Demo` 同级的 `models/openbmb__VoxCPM2` |
+| `<本仓库根目录>/models/openbmb__VoxCPM2/` | 即 `VoxCPM-Demo/models/openbmb__VoxCPM2` |
+
+目录下必须存在 **`config.json`**，否则不会当作有效模型路径。
+
+也可通过环境变量显式指定（优先级高于自动发现）：
+
+- **`HF_REPO_ID`**：Hugging Face 仓库 id（如 `openbmb/VoxCPM2`）或**本地绝对路径**
+- **`NANOVLLM_MODEL_PATH`** / **`NANOVLLM_MODEL`**：同上，见 `app.py` 中 `_resolve_model_ref()`
+
+私有模型需设置 **`HF_TOKEN`**。
+
+## 平台与依赖说明
+
+- **Linux**：安装 CUDA 栈与 `nano-vllm-voxcpm`、`flash-attn` 等（见 `requirements.txt` 中带 `platform_system == "Linux"` 的条目）。
+- **macOS**：安装 `voxcpm`，不安装上述 CUDA 专用包；推理由官方 PyTorch 包完成。
+
+## Hugging Face Spaces（GPU）
+
+在 Space 上仍可使用 **nano-vLLM** 后端；`requirements.txt` 中 Linux 条目会在构建镜像时安装。可选环境变量包括：
+
+- **`HF_REPO_ID`**：默认 `openbmb/VoxCPM2`
+- **`NANOVLLM_MODEL`** / **`NANOVLLM_MODEL_PATH`**：模型 id 或本地路径
+- **`ASR_DEVICE`**：默认 `cpu`
+- **`ZIPENHANCER_MODEL_ID`**：参考音频降噪（ModelScope），默认 `iic/speech_zipenhancer_ans_multiloss_16k_base`
+- **`NANOVLLM_INFERENCE_TIMESTEPS`**：默认 `10`
+- **`NANOVLLM_PREWARM`**：默认 `true`
+- **`NANOVLLM_SERVERPOOL_*`**、`NANOVLLM_MAX_GENERATE_LENGTH`、`NANOVLLM_TEMPERATURE` 等：见 `app.py` 与历史说明
+- **`GRADIO_QUEUE_MAX_SIZE`**、**`GRADIO_DEFAULT_CONCURRENCY_LIMIT`**、**`GRADIO_SSR_MODE`**
+- **`DENOISE_MAX_CONCURRENT`**：默认 `1`
+
+若存在持久化目录 **`/data`**，可将请求日志写到 **`REQUEST_LOG_DIR`**（默认 `/data/logs`）。
+
+## License
+
+Apache-2.0

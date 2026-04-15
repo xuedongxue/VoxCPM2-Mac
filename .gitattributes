@@ -35,6 +35,8 @@ saved_model/**/* filter=lfs diff=lfs merge=lfs -text
 *tfevents* filter=lfs diff=lfs merge=lfs -text
 *.wav filter=lfs diff=lfs merge=lfs -text
 *.png filter=lfs diff=lfs merge=lfs -text
+# 小体积 Logo 直接进仓库，避免 clone 后无 LFS 时页面图片无法显示
+assets/voxcpm_logo.png -filter -diff -merge
 *.mp3 filter=lfs diff=lfs merge=lfs -text
 *.mp4 filter=lfs diff=lfs merge=lfs -text
 *.avi filter=lfs diff=lfs merge=lfs -text

@@ -20,12 +20,25 @@ os.environ["OMP_NUM_THREADS"] = "4"
 os.environ["MKL_NUM_THREADS"] = "4"
 
 DEFAULT_MODEL_REF = "openbmb/VoxCPM2"
+
+
+def _discover_default_local_model_ref() -> str:
+    here = Path(__file__).resolve().parent
+    for candidate in (
+        here.parent / "models" / "openbmb__VoxCPM2",
+        here / "models" / "openbmb__VoxCPM2",
+    ):
+        if candidate.is_dir() and (candidate / "config.json").is_file():
+            return str(candidate)
+    return DEFAULT_MODEL_REF
+
+
 if (
     os.environ.get("NANOVLLM_MODEL", "").strip() == ""
     and os.environ.get("NANOVLLM_MODEL_PATH", "").strip() == ""
     and os.environ.get("HF_REPO_ID", "").strip() == ""
 ):
-    os.environ["HF_REPO_ID"] = DEFAULT_MODEL_REF
+    os.environ["HF_REPO_ID"] = _discover_default_local_model_ref()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -105,6 +118,36 @@ def _get_devices_env() -> list[int]:
     if not values:
         return [0]
     return [int(part) for part in values]
+
+
+def _use_native_voxcpm_backend() -> bool:
+    return sys.platform == "darwin"
+
+
+_voxcpm_pkg_model = None
+
+
+def _get_voxcpm_pkg_model():
+    global _voxcpm_pkg_model
+    if _voxcpm_pkg_model is not None:
+        return _voxcpm_pkg_model
+    with _server_lock:
+        if _voxcpm_pkg_model is not None:
+            return _voxcpm_pkg_model
+        from voxcpm import VoxCPM
+
+        _log_runtime_diagnostics_once()
+        model_ref = _resolve_model_ref()
+        logger.info(f"Loading VoxCPM (PyTorch) from {model_ref} ...")
+        optimize = _get_bool_env("VOXCPM_OPTIMIZE", False)
+        load_denoiser = _get_bool_env("VOXCPM_LOAD_DENOISER", False)
+        _voxcpm_pkg_model = VoxCPM.from_pretrained(
+            model_ref,
+            load_denoiser=load_denoiser,
+            optimize=optimize,
+        )
+        logger.info("VoxCPM (PyTorch) loaded.")
+        return _voxcpm_pkg_model
 
 
 def _resolve_model_ref() -> str:
@@ -291,7 +334,13 @@ def _safe_prompt_wav_recognition(
 
 
 def _stop_server_if_needed() -> None:
-    global _voxcpm_server, _model_info
+    global _voxcpm_server, _model_info, _voxcpm_pkg_model
+    if _voxcpm_pkg_model is not None:
+        try:
+            del _voxcpm_pkg_model
+        except Exception:
+            pass
+        _voxcpm_pkg_model = None
     if _voxcpm_server is None:
         return
 
@@ -720,6 +769,9 @@ def get_voxcpm_server() -> _AsyncServerBridge:
 
 def get_model_info() -> dict:
     global _model_info
+    if _use_native_voxcpm_backend():
+        m = _get_voxcpm_pkg_model()
+        return {"sample_rate": int(m.tts_model.sample_rate)}
     if _model_info is None:
         get_voxcpm_server()
     assert _model_info is not None
@@ -729,7 +781,10 @@ def get_model_info() -> dict:
 def _prewarm_backend() -> None:
     try:
         logger.info("Starting backend prewarm ...")
-        get_voxcpm_server()
+        if _use_native_voxcpm_backend():
+            _get_voxcpm_pkg_model()
+        else:
+            get_voxcpm_server()
         logger.info("Backend prewarm completed.")
     except Exception as exc:
         logger.warning(f"Backend prewarm failed: {exc}")
@@ -765,6 +820,95 @@ def _float_audio_to_int16(wav: np.ndarray) -> np.ndarray:
     return (clipped * 32767.0).astype(np.int16, copy=False)
 
 
+def _generate_tts_audio_once_native(
+    text_input: str,
+    control_instruction: str = "",
+    reference_wav_path_input: Optional[str] = None,
+    use_prompt_text: bool = False,
+    prompt_text_input: str = "",
+    cfg_value_input: float = 2.0,
+    do_normalize: bool = True,
+    denoise: bool = True,
+    request: Optional[gr.Request] = None,
+) -> Tuple[int, np.ndarray]:
+    temp_audio_path = None
+    try:
+        model = _get_voxcpm_pkg_model()
+        model_info = get_model_info()
+
+        text = (text_input or "").strip()
+        if len(text) == 0:
+            raise ValueError("Please input text to synthesize.")
+
+        control = (control_instruction or "").strip()
+        final_text = f"({control}){text}" if control and not use_prompt_text else text
+
+        audio_bytes, audio_format, temp_audio_path = _prepare_audio_for_encoding(
+            reference_wav_path_input,
+            denoise=bool(denoise),
+            request=request,
+        )
+        prompt_text_clean = (prompt_text_input or "").strip()
+        if use_prompt_text and audio_bytes is None:
+            raise ValueError("Ultimate Cloning Mode requires a reference audio clip.")
+        if use_prompt_text and not prompt_text_clean:
+            raise ValueError(
+                "Ultimate Cloning Mode requires a transcript. Please wait for ASR or fill it in manually."
+            )
+        if not use_prompt_text:
+            prompt_text_clean = ""
+
+        ref_path: Optional[str] = None
+        if audio_bytes is not None:
+            ref_path = (
+                temp_audio_path
+                if temp_audio_path
+                else (reference_wav_path_input or "").strip()
+            )
+
+        gen_kw = dict(
+            cfg_value=float(cfg_value_input),
+            inference_timesteps=_get_int_env("NANOVLLM_INFERENCE_TIMESTEPS", 10),
+            normalize=bool(do_normalize),
+            denoise=False,
+            max_len=_get_int_env("NANOVLLM_MAX_GENERATE_LENGTH", 2000),
+        )
+
+        chunks: list[np.ndarray] = []
+        logger.info(f"Generating: '{final_text[:80]}...'")
+        if ref_path is None:
+            stream = model.generate_streaming(text=final_text, **gen_kw)
+        elif use_prompt_text:
+            stream = model.generate_streaming(
+                text=final_text,
+                prompt_wav_path=ref_path,
+                prompt_text=prompt_text_clean,
+                reference_wav_path=ref_path,
+                **gen_kw,
+            )
+        else:
+            stream = model.generate_streaming(
+                text=final_text,
+                reference_wav_path=ref_path,
+                **gen_kw,
+            )
+        for chunk in stream:
+            chunks.append(chunk)
+
+        if not chunks:
+            raise RuntimeError("The model returned no audio chunks.")
+
+        wav = np.concatenate(chunks, axis=0).astype(np.float32, copy=False)
+        wav = _float_audio_to_int16(wav)
+        return (int(model_info["sample_rate"]), wav)
+    finally:
+        if temp_audio_path and os.path.exists(temp_audio_path):
+            try:
+                os.unlink(temp_audio_path)
+            except OSError:
+                pass
+
+
 def _generate_tts_audio_once(
     text_input: str,
     control_instruction: str = "",
@@ -776,6 +920,18 @@ def _generate_tts_audio_once(
     denoise: bool = True,
     request: Optional[gr.Request] = None,
 ) -> Tuple[int, np.ndarray]:
+    if _use_native_voxcpm_backend():
+        return _generate_tts_audio_once_native(
+            text_input=text_input,
+            control_instruction=control_instruction,
+            reference_wav_path_input=reference_wav_path_input,
+            use_prompt_text=use_prompt_text,
+            prompt_text_input=prompt_text_input,
+            cfg_value_input=cfg_value_input,
+            do_normalize=do_normalize,
+            denoise=denoise,
+            request=request,
+        )
     temp_audio_path = None
     try:
         server = get_voxcpm_server()
@@ -964,7 +1120,7 @@ def generate_tts_audio(
 
 
 def create_demo_interface():
-    assets_dir = Path.cwd().absolute() / "assets"
+    assets_dir = Path(__file__).resolve().parent / "assets"
     if assets_dir.exists():
         gr.set_static_paths(paths=[assets_dir])
 
@@ -991,12 +1147,23 @@ def create_demo_interface():
         )
 
     with gr.Blocks() as interface:
-        if (assets_dir / "voxcpm_logo.png").exists():
-            gr.HTML(
-                '<div class="logo-container">'
-                '<img src="/gradio_api/file=assets/voxcpm_logo.png" alt="VoxCPM Logo">'
-                "</div>"
-            )
+        logo_file = assets_dir / "voxcpm_logo.png"
+        if logo_file.is_file():
+            _logo_bytes = logo_file.read_bytes()
+            if len(_logo_bytes) >= 8 and _logo_bytes[:8] == b"\x89PNG\r\n\x1a\n":
+                gr.Image(
+                    value=str(logo_file.resolve()),
+                    label="",
+                    show_label=False,
+                    format="png",
+                    height=80,
+                    sources=[],
+                    interactive=False,
+                    container=False,
+                    buttons=[],
+                    elem_classes=["logo-container"],
+                    min_width=120,
+                )
 
         gr.Markdown(I18N("usage_instructions"))
 
@@ -1108,5 +1275,44 @@ def run_demo(
     )
 
 
+def _running_in_project_venv() -> bool:
+    venv_root = Path(__file__).resolve().parent / ".venv"
+    try:
+        return Path(sys.prefix).resolve() == venv_root.resolve()
+    except OSError:
+        return False
+
+
+def _ensure_runtime_deps() -> None:
+    if not _use_native_voxcpm_backend():
+        return
+    try:
+        import voxcpm  # noqa: F401
+    except ImportError:
+        venv_python = Path(__file__).resolve().parent / ".venv" / "bin" / "python"
+        if (
+            venv_python.is_file()
+            and not os.environ.get("_VOXCPM_DEMO_REEXEC")
+            and not _running_in_project_venv()
+        ):
+            os.environ["_VOXCPM_DEMO_REEXEC"] = "1"
+            app_main = str(Path(__file__).resolve())
+            os.execv(str(venv_python), [str(venv_python), app_main, *sys.argv[1:]])
+        exe = sys.executable
+        print(
+            "缺少 voxcpm。\n"
+            f"当前 Python: {exe}\n"
+            f"请执行: {exe} -m pip install -r requirements.txt\n"
+            + (
+                f"或使用已有虚拟环境: {venv_python} {Path(__file__).name}\n"
+                if venv_python.is_file()
+                else ""
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
 if __name__ == "__main__":
+    _ensure_runtime_deps()
     run_demo()

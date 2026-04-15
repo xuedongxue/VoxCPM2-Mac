@@ -1,13 +1,9 @@
-gradio==6.0.0
+gradio>=6.6.0,<7
 huggingface-hub
 funasr
 modelscope>=1.22.0
 numpy>=1.21.0
-torch==2.5.1
-torchaudio==2.5.1
-triton==3.1.0
-flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.5cxx11abiFALSE-cp310-cp310-linux_x86_64.whl
-nano-vllm-voxcpm @ git+https://github.com/a710128/nanovllm-voxcpm.git@49e8bc25e93e33dda4decf0b6775b44ff6bb8bcc
+torchcodec
 transformers>=4.51.0
 addict
 simplejson
@@ -17,9 +13,16 @@ tqdm
 librosa
 pydantic
 soundfile>=0.13.1
-torchcodec
 packaging
 psutil
 ninja
 setuptools
 wheel
+torch==2.5.1; platform_system == "Linux"
+torch>=2.5.0; platform_system == "Darwin"
+torchaudio==2.5.1; platform_system == "Linux"
+torchaudio>=2.5.0; platform_system == "Darwin"
+triton==3.1.0; platform_system == "Linux"
+flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.5cxx11abiFALSE-cp310-cp310-linux_x86_64.whl; platform_system == "Linux"
+nano-vllm-voxcpm @ git+https://github.com/a710128/nanovllm-voxcpm.git@49e8bc25e93e33dda4decf0b6775b44ff6bb8bcc; platform_system == "Linux"
+voxcpm; platform_system == "Darwin"

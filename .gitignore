@@ -1,0 +1,102 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments（整目录忽略，含 .venv/lib/、bin/ 等，勿提交）
+.venv/
+venv/
+ENV/
+env/
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.pytest_cache/
+.hypothesis/
+
+# Type checkers / linters
+.mypy_cache/
+.ruff_cache/
+.dmypy.json
+dmypy.json
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment variables (secrets)
+.env
+.env.*
+!.env.example
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# IDE / editor
+.idea/
+*.swp
+*.swo
+*~
+
+# Large / downloaded model weights (do not commit)
+*.safetensors
+*.ckpt
+*.pth
+*.pt
+*.onnx
+*.gguf
+*.h5
+*.npz
+*.npy
+
+# Optional: local model directory inside repo
+/models/
+
+# Hugging Face / ModelScope download cache if created under project
+.huggingface/
+.modelscope/
+
+# Gradio
+flagged/
+gradio_cached_examples/
+
+# Temporary audio outputs
+*.wav
+!examples/*.wav
