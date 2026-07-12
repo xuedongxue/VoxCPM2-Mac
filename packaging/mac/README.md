@@ -25,7 +25,7 @@ VoxCPM2.app/
   Contents/
     MacOS/VoxCPM2              # launcher (packaging/mac/launcher.sh)
     Resources/
-      AppIcon.icns             # app icon (from assets/voxcpm_logo.png)
+      AppIcon.icns             # app icon (from packaging/mac/assets/icon-source.png)
       runtime/                 # Python venv with macOS deps
       app/                     # app.py, examples/, assets/
       bin/ffmpeg               # bundled ffmpeg
@@ -117,7 +117,7 @@ Scripts are idempotent. Re-running `build.sh` removes the previous `build/` tree
 
 | File | Purpose |
 |------|---------|
-| `generate-icons.sh` | Build `AppIcon.icns` / `VolumeIcon.icns` from `assets/voxcpm_logo.png` |
+| `generate-icons.sh` | Build `AppIcon.icns` / `VolumeIcon.icns` from `packaging/mac/assets/icon-source.png` |
 | `assets/AppIcon.icns` | Committed app icon (regenerate when logo changes) |
 | `requirements-mac.txt` | Darwin-only pip dependencies |
 | `launcher.sh` | App entry point copied to `MacOS/VoxCPM2` |

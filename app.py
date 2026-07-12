@@ -579,10 +579,14 @@ _I18N_TRANSLATIONS = {
         "usage_instructions": _USAGE_INSTRUCTIONS_EN,
         "examples_footer": _EXAMPLES_FOOTER_EN,
         "settings_title": "Model Settings",
-        "model_path_label": "Local VoxCPM2 model folder",
-        "model_path_placeholder": "/path/to/VoxCPM2-model-directory",
-        "model_browse_btn": "Browse…",
-        "model_save_load_btn": "Save & Load Model",
+        "model_path_label": "Selected model folder",
+        "model_path_none": "(not selected)",
+        "model_choose_btn": "Choose Model Folder",
+        "model_picker_prompt": "Select VoxCPM2 Model Folder",
+        "model_first_run_hint": (
+            "No model configured yet. Click **Choose Model Folder** to select your local "
+            "VoxCPM2 model directory (must contain `config.json`)."
+        ),
         "model_invalid_path_error": (
             "Invalid model folder: path must exist, be a directory, and contain config.json."
         ),
@@ -614,10 +618,13 @@ _I18N_TRANSLATIONS = {
         "usage_instructions": _USAGE_INSTRUCTIONS_ZH,
         "examples_footer": _EXAMPLES_FOOTER_ZH,
         "settings_title": "模型设置",
-        "model_path_label": "本地 VoxCPM2 模型目录",
-        "model_path_placeholder": "/path/to/VoxCPM2-model-directory",
-        "model_browse_btn": "浏览…",
-        "model_save_load_btn": "保存并加载模型",
+        "model_path_label": "已选模型目录",
+        "model_path_none": "（未选择）",
+        "model_choose_btn": "选择模型文件夹",
+        "model_picker_prompt": "选择 VoxCPM2 模型文件夹",
+        "model_first_run_hint": (
+            "尚未配置模型。请点击 **选择模型文件夹**，选择本地 VoxCPM2 模型目录（须包含 `config.json`）。"
+        ),
         "model_invalid_path_error": "无效的模型目录：路径必须存在、为文件夹，且包含 config.json。",
         "model_load_failed_error": "配置已保存，但模型加载失败：{error}",
     },
@@ -1277,7 +1284,53 @@ def _format_model_status(
     return "\n\n".join(lines)
 
 
-def _browse_model_folder(current_path: str = "") -> str:
+def _resolve_system_language() -> str:
+    for var in ("LANG", "LC_ALL", "LC_MESSAGES"):
+        value = os.environ.get(var, "").lower()
+        if value.startswith("zh"):
+            return "zh-CN"
+    return "en"
+
+
+def _get_i18n_text_for_locale(key: str, locale: str) -> str:
+    return _I18N_TRANSLATIONS.get(locale, _I18N_TRANSLATIONS["en"]).get(
+        key, _I18N_TRANSLATIONS["en"].get(key, key)
+    )
+
+
+def _has_configured_model() -> bool:
+    saved_path = str(_load_app_config().get("model_path", "")).strip()
+    return _is_valid_model_dir(saved_path)
+
+
+def _applescript_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _pick_model_folder_macos(prompt: str) -> str:
+    escaped_prompt = _applescript_escape(prompt)
+    script = f'POSIX path of (choose folder with prompt "{escaped_prompt}")'
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=600,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning(f"macOS folder picker failed: {exc}")
+        return ""
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def _pick_model_folder(prompt: str) -> str:
+    if sys.platform == "darwin":
+        selected = _pick_model_folder_macos(prompt)
+        if selected:
+            return selected
     try:
         import tkinter as tk
         from tkinter import filedialog
@@ -1288,19 +1341,44 @@ def _browse_model_folder(current_path: str = "") -> str:
             root.attributes("-topmost", True)
         except tk.TclError:
             pass
-        initialdir = None
-        current = (current_path or "").strip()
-        if current and Path(current).expanduser().is_dir():
-            initialdir = str(Path(current).expanduser())
-        selected = filedialog.askdirectory(
-            title="Select VoxCPM2 Model Folder",
-            initialdir=initialdir,
-        )
+        selected = filedialog.askdirectory(title=prompt)
         root.destroy()
-        return selected or current
+        return selected or ""
     except Exception as exc:
-        logger.warning(f"Folder browse dialog failed: {exc}")
-        return current_path
+        logger.warning(f"Folder picker failed: {exc}")
+        return ""
+
+
+def _offer_first_run_model_picker() -> None:
+    if _has_configured_model():
+        return
+    locale = _resolve_system_language()
+    prompt = _get_i18n_text_for_locale("model_picker_prompt", locale)
+    selected = _pick_model_folder(prompt)
+    if not selected or not _is_valid_model_dir(selected):
+        return
+    abs_path = str(Path(selected).expanduser().resolve())
+    _save_app_config({"model_path": abs_path})
+    for env_name in ("NANOVLLM_MODEL", "NANOVLLM_MODEL_PATH"):
+        os.environ.pop(env_name, None)
+    os.environ["HF_REPO_ID"] = abs_path
+    logger.info(f"First-run model folder selected: {abs_path}")
+
+
+def _choose_and_load_model(
+    current_path: str = "", request: Optional[gr.Request] = None
+) -> tuple[str, str]:
+    prompt = _get_i18n_text("model_picker_prompt", request)
+    selected = _pick_model_folder(prompt)
+    if not selected:
+        display_path = (current_path or "").strip() or _get_initial_model_path()
+        if not display_path:
+            display_path = _get_i18n_text("model_path_none", request)
+        return display_path, _format_model_status(current_path)
+    if not _is_valid_model_dir(selected):
+        raise gr.Error(_get_i18n_text("model_invalid_path_error", request))
+    status = _save_and_reload_model(selected, request)
+    return str(Path(selected).expanduser().resolve()), status
 
 
 def _save_and_reload_model(
@@ -1399,35 +1477,25 @@ def create_demo_interface():
 
         if _PACKAGED_MODE:
             with gr.Accordion(I18N("settings_title"), open=True):
-                model_path_input = gr.Textbox(
-                    value=_get_initial_model_path(),
+                if not _has_configured_model():
+                    gr.Markdown(I18N("model_first_run_hint"))
+                initial_path = _get_initial_model_path()
+                model_path_display = gr.Textbox(
+                    value=initial_path or I18N("model_path_none"),
                     label=I18N("model_path_label"),
-                    placeholder=I18N("model_path_placeholder"),
+                    interactive=False,
                     lines=1,
                 )
-                with gr.Row():
-                    browse_btn = gr.Button(
-                        I18N("model_browse_btn"),
-                        scale=0,
-                        min_width=100,
-                    )
-                    save_load_btn = gr.Button(
-                        I18N("model_save_load_btn"),
-                        variant="primary",
-                        scale=0,
-                        min_width=160,
-                    )
+                choose_btn = gr.Button(
+                    I18N("model_choose_btn"),
+                    variant="primary",
+                )
                 model_status = gr.Markdown(value=_format_model_status())
 
-                browse_btn.click(
-                    fn=_browse_model_folder,
-                    inputs=[model_path_input],
-                    outputs=[model_path_input],
-                )
-                save_load_btn.click(
-                    fn=_save_and_reload_model,
-                    inputs=[model_path_input],
-                    outputs=[model_status],
+                choose_btn.click(
+                    fn=_choose_and_load_model,
+                    inputs=[model_path_display],
+                    outputs=[model_path_display, model_status],
                     show_progress=True,
                 )
 
@@ -1603,6 +1671,7 @@ def run_demo(
     default_port = int(os.environ.get("PORT", server_port))
     port = default_port
     if _PACKAGED_MODE:
+        _offer_first_run_model_picker()
         if "PORT" not in os.environ:
             port, already_running = _resolve_packaged_port(
                 host, default_port, default_port + 10

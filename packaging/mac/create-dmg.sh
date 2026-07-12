@@ -37,6 +37,31 @@ The app launches a local Gradio web UI (default http://127.0.0.1:7860).
 EOF
 }
 
+apply_volume_icon_hdiutil() {
+  local mount_dir="${SCRIPT_DIR}/build/dmg-mount"
+  local vol_icon="${SCRIPT_DIR}/assets/VolumeIcon.icns"
+  local temp_dmg="${SCRIPT_DIR}/build/${APP_NAME}-temp.dmg"
+  local device=""
+
+  [[ -f "${vol_icon}" ]] || return 0
+
+  rm -rf "${mount_dir}"
+  mkdir -p "${mount_dir}"
+  device="$(hdiutil attach -readwrite -noverify -noautoopen -mountpoint "${mount_dir}" "${temp_dmg}" | awk '/\/dev\// {print $1; exit}')"
+  [[ -n "${device}" ]] || die "Failed to mount temporary DMG for volume icon"
+
+  cp "${vol_icon}" "${mount_dir}/.VolumeIcon.icns"
+  if command -v SetFile >/dev/null 2>&1; then
+    SetFile -a C "${mount_dir}"
+  else
+    # Xcode CLT SetFile; fallback keeps icon copy without custom-volume flag
+    :
+  fi
+  sync
+  hdiutil detach "${device}" >/dev/null
+  rmdir "${mount_dir}" 2>/dev/null || true
+}
+
 create_dmg_hdiutil() {
   local vol_name="${APP_NAME}"
   local temp_dmg="${SCRIPT_DIR}/build/${APP_NAME}-temp.dmg"
@@ -49,6 +74,8 @@ create_dmg_hdiutil() {
     -ov \
     -format UDRW \
     "${temp_dmg}"
+
+  apply_volume_icon_hdiutil
 
   info "Converting to compressed read-only DMG"
   hdiutil convert "${temp_dmg}" -format UDZO -o "${DMG_PATH}"
@@ -80,10 +107,8 @@ create_dmg_create_dmg() {
 main() {
   [[ -d "${APP_BUNDLE}" ]] || die "App bundle not found. Run build.sh first: ${APP_BUNDLE}"
 
-  if [[ ! -f "${SCRIPT_DIR}/assets/VolumeIcon.icns" ]]; then
-    info "Volume icon missing; generating icons"
-    bash "${SCRIPT_DIR}/generate-icons.sh"
-  fi
+  info "Refreshing DMG volume icon from latest AppIcon"
+  bash "${SCRIPT_DIR}/generate-icons.sh"
 
   info "Staging DMG contents"
   rm -rf "${STAGING_DIR}"

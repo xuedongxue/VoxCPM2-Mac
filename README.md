@@ -1,17 +1,3 @@
----
-title: VoxCPM Demo
-emoji: 🎙️
-colorFrom: blue
-colorTo: indigo
-sdk: gradio
-sdk_version: 6.12.0
-app_file: app.py
-python_version: "3.10"
-pinned: true
-license: apache-2.0
-short_description: VoxCPM2 Gradio Demo (Nano-vLLM on Linux / voxcpm on macOS)
----
-
 # VoxCPM2 for macOS
 
 [![Release](https://img.shields.io/github/v/release/xuedongxue/VoxCPM2-Mac)](https://github.com/xuedongxue/VoxCPM2-Mac/releases)

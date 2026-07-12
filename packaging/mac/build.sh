@@ -154,7 +154,7 @@ for a in data.get('assets', []):
 ensure_app_icons() {
   local icns="${SCRIPT_DIR}/assets/AppIcon.icns"
   if [[ ! -f "${icns}" ]]; then
-    info "AppIcon.icns not found; generating from assets/voxcpm_logo.png"
+    info "AppIcon.icns not found; generating from packaging/mac/assets/icon-source.png"
     bash "${SCRIPT_DIR}/generate-icons.sh"
   fi
   [[ -f "${icns}" ]] || die "AppIcon.icns missing. Run packaging/mac/generate-icons.sh"

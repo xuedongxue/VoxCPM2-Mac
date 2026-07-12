@@ -42,14 +42,17 @@ fi
 
 cd "${RESOURCES_DIR}/app"
 
-set +e
-"${PYTHON}" "${APP}" --packaged "$@"
-status=$?
-set -e
+# Background the server and exit quickly so macOS does not keep the Dock icon bouncing.
+nohup "${PYTHON}" "${APP}" --packaged "$@" >>"${LOG_FILE}" 2>&1 &
+SERVER_PID=$!
+echo "VoxCPM2 server PID: ${SERVER_PID}" >>"${LOG_FILE}"
 
-if [[ "${status}" -ne 0 ]]; then
-  echo "VoxCPM2 exited with status ${status}" >>"${LOG_FILE}"
-  osascript -e "display alert \"VoxCPM2 failed to start\" message \"See ${LOG_FILE} for details.\"" 2>/dev/null || true
+sleep 1
+if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
+  msg="VoxCPM2 failed to start (process exited immediately). See ${LOG_FILE}."
+  echo "${msg}" >>"${LOG_FILE}"
+  osascript -e "display alert \"VoxCPM2 failed to start\" message \"${msg}\"" 2>/dev/null || true
+  exit 1
 fi
 
-exit "${status}"
+exit 0
