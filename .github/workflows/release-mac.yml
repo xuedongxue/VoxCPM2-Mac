@@ -1,0 +1,41 @@
+name: Release macOS DMG
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-dmg:
+    name: Build VoxCPM2.dmg
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install build dependencies
+        run: |
+          brew install ffmpeg create-dmg
+
+      - name: Build .app bundle
+        run: bash packaging/mac/build.sh
+
+      - name: Create DMG
+        run: bash packaging/mac/create-dmg.sh
+
+      - name: Upload DMG to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: packaging/mac/dist/VoxCPM2.dmg
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

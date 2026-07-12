@@ -1,0 +1,30 @@
+# macOS (Darwin) runtime dependencies for VoxCPM2.app
+# Subset of requirements.txt — no Linux/CUDA-only packages.
+
+gradio>=6.6.0,<7
+huggingface-hub
+funasr
+modelscope>=1.22.0
+numpy>=1.21.0
+torchcodec
+transformers>=4.51.0
+addict
+simplejson
+sortedcontainers
+xxhash
+tqdm
+librosa
+pydantic
+soundfile>=0.13.1
+packaging
+psutil
+ninja
+setuptools
+wheel
+
+# PyTorch (CPU/MPS on Apple Silicon)
+torch>=2.5.0
+torchaudio>=2.5.0
+
+# Native macOS backend (see app.py _use_native_voxcpm_backend)
+voxcpm

@@ -19,7 +19,91 @@ os.environ["OPENBLAS_NUM_THREADS"] = "4"
 os.environ["OMP_NUM_THREADS"] = "4"
 os.environ["MKL_NUM_THREADS"] = "4"
 
+_PACKAGED_MODE = False
+_VOXCPM_HOME: Optional[Path] = None
+
 DEFAULT_MODEL_REF = "openbmb/VoxCPM2"
+_MODEL_ENV_NAMES = ("NANOVLLM_MODEL", "NANOVLLM_MODEL_PATH", "HF_REPO_ID")
+
+
+def _is_packaged_mode() -> bool:
+    if "--packaged" in sys.argv:
+        return True
+    value = os.environ.get("VOXCPM_PACKAGED", "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def _parse_cli_args() -> None:
+    global _PACKAGED_MODE
+    _PACKAGED_MODE = _is_packaged_mode()
+    if _PACKAGED_MODE:
+        os.environ.setdefault("VOXCPM_PACKAGED", "1")
+    while "--packaged" in sys.argv:
+        sys.argv.remove("--packaged")
+
+
+def _default_voxcpm_home() -> Path:
+    return Path.home() / "Library" / "Application Support" / "VoxCPM2"
+
+
+def _get_voxcpm_home() -> Path:
+    if _VOXCPM_HOME is not None:
+        return _VOXCPM_HOME
+    raw = os.environ.get("VOXCPM_HOME", "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return _default_voxcpm_home()
+
+
+def _app_config_path() -> Path:
+    return _get_voxcpm_home() / "config.json"
+
+
+def _load_app_config() -> dict:
+    path = _app_config_path()
+    if not path.is_file():
+        return {}
+    try:
+        with path.open(encoding="utf-8") as fp:
+            data = json.load(fp)
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_app_config(config: dict) -> None:
+    home = _get_voxcpm_home()
+    home.mkdir(parents=True, exist_ok=True)
+    with _app_config_path().open("w", encoding="utf-8") as fp:
+        json.dump(config, fp, indent=2)
+        fp.write("\n")
+
+
+def _is_valid_model_dir(path: str) -> bool:
+    if not path or not str(path).strip():
+        return False
+    model_dir = Path(path).expanduser()
+    return model_dir.is_dir() and (model_dir / "config.json").is_file()
+
+
+def _configure_packaged_mode() -> None:
+    global _VOXCPM_HOME
+    if not _PACKAGED_MODE:
+        return
+
+    _VOXCPM_HOME = _get_voxcpm_home()
+    _VOXCPM_HOME.mkdir(parents=True, exist_ok=True)
+
+    hf_home = _VOXCPM_HOME / "cache" / "huggingface"
+    modelscope_cache = _VOXCPM_HOME / "cache" / "modelscope"
+    for cache_dir in (hf_home, modelscope_cache):
+        cache_dir.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("HF_HOME", str(hf_home))
+    os.environ.setdefault("MODELSCOPE_CACHE", str(modelscope_cache))
+
+    saved_path = str(_load_app_config().get("model_path", "")).strip()
+    if _is_valid_model_dir(saved_path):
+        os.environ["HF_REPO_ID"] = str(Path(saved_path).expanduser().resolve())
 
 
 def _discover_default_local_model_ref() -> str:
@@ -33,12 +117,19 @@ def _discover_default_local_model_ref() -> str:
     return DEFAULT_MODEL_REF
 
 
-if (
-    os.environ.get("NANOVLLM_MODEL", "").strip() == ""
-    and os.environ.get("NANOVLLM_MODEL_PATH", "").strip() == ""
-    and os.environ.get("HF_REPO_ID", "").strip() == ""
-):
+def _model_ref_env_set() -> bool:
+    return any(os.environ.get(name, "").strip() for name in _MODEL_ENV_NAMES)
+
+
+def _apply_default_model_resolution() -> None:
+    if _model_ref_env_set():
+        return
     os.environ["HF_REPO_ID"] = _discover_default_local_model_ref()
+
+
+_parse_cli_args()
+_configure_packaged_mode()
+_apply_default_model_resolution()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -333,14 +424,21 @@ def _safe_prompt_wav_recognition(
 
 
 
-def _stop_server_if_needed() -> None:
-    global _voxcpm_server, _model_info, _voxcpm_pkg_model
+def _unload_voxcpm_model() -> None:
+    global _voxcpm_pkg_model, _model_info, _runtime_diag_logged
     if _voxcpm_pkg_model is not None:
         try:
             del _voxcpm_pkg_model
         except Exception:
             pass
         _voxcpm_pkg_model = None
+    _model_info = None
+    _runtime_diag_logged = False
+
+
+def _stop_server_if_needed() -> None:
+    global _voxcpm_server
+    _unload_voxcpm_model()
     if _voxcpm_server is None:
         return
 
@@ -355,7 +453,6 @@ def _stop_server_if_needed() -> None:
                 logger.warning(f"Failed to stop nano-vLLM server cleanly: {exc}")
 
     _voxcpm_server = None
-    _model_info = None
 
 
 atexit.register(_stop_server_if_needed)
@@ -462,6 +559,15 @@ _I18N_TRANSLATIONS = {
         "asr_failed_error": "ASR failed. Please fill the transcript manually or try another reference audio.",
         "usage_instructions": _USAGE_INSTRUCTIONS_EN,
         "examples_footer": _EXAMPLES_FOOTER_EN,
+        "settings_title": "Model Settings",
+        "model_path_label": "Local VoxCPM2 model folder",
+        "model_path_placeholder": "/path/to/VoxCPM2-model-directory",
+        "model_browse_btn": "Browse…",
+        "model_save_load_btn": "Save & Load Model",
+        "model_invalid_path_error": (
+            "Invalid model folder: path must exist, be a directory, and contain config.json."
+        ),
+        "model_load_failed_error": "Model saved but failed to load: {error}",
     },
     "zh-CN": {
         "reference_audio_label": "🎤 参考音频（可选 — 上传后用于克隆）",
@@ -488,6 +594,13 @@ _I18N_TRANSLATIONS = {
         "asr_failed_error": "ASR 识别失败，请手动填写参考音频文本，或更换一段参考音频后重试。",
         "usage_instructions": _USAGE_INSTRUCTIONS_ZH,
         "examples_footer": _EXAMPLES_FOOTER_ZH,
+        "settings_title": "模型设置",
+        "model_path_label": "本地 VoxCPM2 模型目录",
+        "model_path_placeholder": "/path/to/VoxCPM2-model-directory",
+        "model_browse_btn": "浏览…",
+        "model_save_load_btn": "保存并加载模型",
+        "model_invalid_path_error": "无效的模型目录：路径必须存在、为文件夹，且包含 config.json。",
+        "model_load_failed_error": "配置已保存，但模型加载失败：{error}",
     },
     "zh-Hans": None,
     "zh": None,
@@ -1116,6 +1229,104 @@ def generate_tts_audio(
         _end_generation_request()
 
 
+# ---------- Packaged app settings ----------
+
+
+def _get_initial_model_path() -> str:
+    saved_path = str(_load_app_config().get("model_path", "")).strip()
+    if saved_path:
+        return saved_path
+    model_ref = _resolve_model_ref()
+    if Path(model_ref).is_dir():
+        return model_ref
+    return ""
+
+
+def _format_model_status(
+    model_path: str = "",
+    *,
+    loaded: Optional[bool] = None,
+    error: str = "",
+) -> str:
+    path = (model_path or "").strip() or _resolve_model_ref()
+    if loaded is None:
+        loaded = _voxcpm_pkg_model is not None or _voxcpm_server is not None
+    status = "Loaded" if loaded else "Not loaded"
+    lines = [f"**Path:** `{path}`", f"**Status:** {status}"]
+    if error:
+        lines.append(f"**Error:** {error}")
+    return "\n\n".join(lines)
+
+
+def _browse_model_folder(current_path: str = "") -> str:
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            root.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        initialdir = None
+        current = (current_path or "").strip()
+        if current and Path(current).expanduser().is_dir():
+            initialdir = str(Path(current).expanduser())
+        selected = filedialog.askdirectory(
+            title="Select VoxCPM2 Model Folder",
+            initialdir=initialdir,
+        )
+        root.destroy()
+        return selected or current
+    except Exception as exc:
+        logger.warning(f"Folder browse dialog failed: {exc}")
+        return current_path
+
+
+def _save_and_reload_model(
+    model_path: str, request: Optional[gr.Request] = None
+) -> str:
+    path = (model_path or "").strip()
+    if not _is_valid_model_dir(path):
+        raise gr.Error(_get_i18n_text("model_invalid_path_error", request))
+
+    abs_path = str(Path(path).expanduser().resolve())
+    _save_app_config({"model_path": abs_path})
+    for env_name in ("NANOVLLM_MODEL", "NANOVLLM_MODEL_PATH"):
+        os.environ.pop(env_name, None)
+    os.environ["HF_REPO_ID"] = abs_path
+
+    if _use_native_voxcpm_backend():
+        _unload_voxcpm_model()
+        try:
+            _get_voxcpm_pkg_model()
+            return _format_model_status(abs_path, loaded=True)
+        except Exception as exc:
+            logger.exception("Failed to reload VoxCPM model")
+            return _format_model_status(
+                abs_path,
+                loaded=False,
+                error=_get_i18n_text("model_load_failed_error", request).format(
+                    error=str(exc)
+                ),
+            )
+
+    _stop_server_if_needed()
+    try:
+        get_voxcpm_server()
+        return _format_model_status(abs_path, loaded=True)
+    except Exception as exc:
+        logger.exception("Failed to reload VoxCPM server")
+        return _format_model_status(
+            abs_path,
+            loaded=False,
+            error=_get_i18n_text("model_load_failed_error", request).format(
+                error=str(exc)
+            ),
+        )
+
+
 # ---------- UI ----------
 
 
@@ -1166,6 +1377,40 @@ def create_demo_interface():
                 )
 
         gr.Markdown(I18N("usage_instructions"))
+
+        if _PACKAGED_MODE:
+            with gr.Accordion(I18N("settings_title"), open=True):
+                model_path_input = gr.Textbox(
+                    value=_get_initial_model_path(),
+                    label=I18N("model_path_label"),
+                    placeholder=I18N("model_path_placeholder"),
+                    lines=1,
+                )
+                with gr.Row():
+                    browse_btn = gr.Button(
+                        I18N("model_browse_btn"),
+                        scale=0,
+                        min_width=100,
+                    )
+                    save_load_btn = gr.Button(
+                        I18N("model_save_load_btn"),
+                        variant="primary",
+                        scale=0,
+                        min_width=160,
+                    )
+                model_status = gr.Markdown(value=_format_model_status())
+
+                browse_btn.click(
+                    fn=_browse_model_folder,
+                    inputs=[model_path_input],
+                    outputs=[model_path_input],
+                )
+                save_load_btn.click(
+                    fn=_save_and_reload_model,
+                    inputs=[model_path_input],
+                    outputs=[model_status],
+                    show_progress=True,
+                )
 
         with gr.Row():
             with gr.Column():
@@ -1261,11 +1506,8 @@ def run_demo(
 ):
     interface = create_demo_interface()
     _start_background_prewarm()
-    interface.queue(
-        max_size=_get_int_env("GRADIO_QUEUE_MAX_SIZE", 10),
-        default_concurrency_limit=_get_int_env("GRADIO_DEFAULT_CONCURRENCY_LIMIT", 4),
-    ).launch(
-        server_name=server_name,
+    launch_kwargs = dict(
+        server_name="127.0.0.1" if _PACKAGED_MODE else server_name,
         server_port=int(os.environ.get("PORT", server_port)),
         show_error=show_error,
         i18n=I18N,
@@ -1273,6 +1515,12 @@ def run_demo(
         css=_CUSTOM_CSS,
         ssr_mode=_get_bool_env("GRADIO_SSR_MODE", False),
     )
+    if _PACKAGED_MODE:
+        launch_kwargs["inbrowser"] = True
+    interface.queue(
+        max_size=_get_int_env("GRADIO_QUEUE_MAX_SIZE", 10),
+        default_concurrency_limit=_get_int_env("GRADIO_DEFAULT_CONCURRENCY_LIMIT", 4),
+    ).launch(**launch_kwargs)
 
 
 def _running_in_project_venv() -> bool:

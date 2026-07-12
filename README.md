@@ -16,7 +16,52 @@ short_description: VoxCPM2 Gradio Demo (Nano-vLLM on Linux / voxcpm on macOS)
 
 基于 Gradio 的 [VoxCPM2](https://huggingface.co/openbmb/VoxCPM2) 演示：在 **Linux + NVIDIA GPU** 上使用 **nano-vLLM** 推理；在 **macOS** 上使用官方 **voxcpm**（PyTorch，支持 MPS/CPU）。
 
-## 本地使用
+## macOS 安装包（推荐）
+
+面向不想手动配置 Python 环境的 macOS 用户，可直接下载 **DMG 安装包**（Apple Silicon / arm64，需 **macOS 13+**）。
+
+### 安装步骤
+
+1. **下载 DMG**  
+   前往本仓库 [Releases](https://github.com/xuedongxue/VoxCPM2-Mac/releases) 页面，下载最新版 `VoxCPM2.dmg`。
+
+2. **安装应用**  
+   打开 DMG，将 **VoxCPM2.app** 拖入「应用程序」（Applications）文件夹。
+
+3. **首次启动（重要）**  
+   本应用为开源项目，**未使用付费 Apple 开发者证书签名**。首次打开时 macOS Gatekeeper 可能提示「无法验证开发者」或「已损坏」：
+   - 在 Finder 中**右键点击** VoxCPM2.app → 选择 **「打开」** → 在弹窗中再次点击 **「打开」**；
+   - 或在「系统设置 → 隐私与安全性」中允许该应用运行。  
+   完成一次后，之后可正常双击启动。
+
+4. **选择本地模型目录**  
+   主模型 **不会** 打包进安装包。启动后在应用设置中选择本机上的 **VoxCPM2 模型文件夹**（目录内须包含 `config.json` 及权重文件）。ASR / 降噪模型可在首次使用时按需下载。
+
+5. **使用**  
+   应用启动后会自动在默认浏览器中打开 Gradio 界面，即可进行语音合成。
+
+### 系统要求
+
+| 项目 | 要求 |
+|------|------|
+| 系统 | macOS **13**（Ventura）或更高 |
+| 芯片 | **Apple Silicon（M 系列）** 推荐；本 DMG 为 arm64 构建 |
+| 磁盘 | 应用本体约数 GB；另需为模型权重预留空间（约 5 GB+） |
+
+### 模型下载
+
+从 Hugging Face 下载完整模型到本地，例如：
+
+- 仓库：[openbmb/VoxCPM2](https://huggingface.co/openbmb/VoxCPM2)
+- 可使用 `huggingface-cli download openbmb/VoxCPM2 --local-dir ~/Models/VoxCPM2`，或从网页下载全部文件到同一文件夹
+- 确保目录中有 **`config.json`**、`*.safetensors`、`audiovae.pth` 等文件
+- 在 VoxCPM2.app 设置中指向该文件夹即可
+
+更详细的图文说明见 [`packaging/mac/INSTALL_zh.md`](packaging/mac/INSTALL_zh.md)。
+
+---
+
+## 本地使用（开发者）
 
 ### 环境
 

@@ -15,6 +15,11 @@ env/
 build/
 develop-eggs/
 dist/
+packaging/mac/build/
+packaging/mac/dist/
+*.dmg
+packaging/mac/.staging/
+packaging/mac/out/
 downloads/
 eggs/
 .eggs/
