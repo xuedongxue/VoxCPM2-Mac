@@ -653,9 +653,9 @@ _CUSTOM_CSS = """
     margin: 0.5rem 0 1rem 0;
 }
 .logo-container img {
-    height: 80px;
+    height: 72px;
     width: auto;
-    max-width: 200px;
+    max-width: 120px;
     display: inline-block;
 }
 
@@ -1367,7 +1367,7 @@ def create_demo_interface():
                     label="",
                     show_label=False,
                     format="png",
-                    height=80,
+                    height=72,
                     sources=[],
                     interactive=False,
                     container=False,
@@ -1515,6 +1515,9 @@ def run_demo(
         css=_CUSTOM_CSS,
         ssr_mode=_get_bool_env("GRADIO_SSR_MODE", False),
     )
+    favicon_file = Path(__file__).resolve().parent / "assets" / "favicon.png"
+    if favicon_file.is_file():
+        launch_kwargs["favicon_path"] = str(favicon_file.resolve())
     if _PACKAGED_MODE:
         launch_kwargs["inbrowser"] = True
     interface.queue(

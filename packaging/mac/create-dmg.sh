@@ -58,20 +58,32 @@ create_dmg_hdiutil() {
 create_dmg_create_dmg() {
   info "Using create-dmg (if installed)"
   rm -f "${DMG_PATH}"
+  local vol_icon="${SCRIPT_DIR}/assets/VolumeIcon.icns"
+  local -a dmg_args=(
+    --volname "${APP_NAME}"
+    --window-pos 200 120
+    --window-size 600 400
+    --icon-size 100
+    --icon "${APP_NAME}.app" 150 190
+    --hide-extension "${APP_NAME}.app"
+    --app-drop-link 450 190
+  )
+  if [[ -f "${vol_icon}" ]]; then
+    dmg_args+=(--volicon "${vol_icon}")
+  fi
   create-dmg \
-    --volname "${APP_NAME}" \
-    --window-pos 200 120 \
-    --window-size 600 400 \
-    --icon-size 100 \
-    --icon "${APP_NAME}.app" 150 190 \
-    --hide-extension "${APP_NAME}.app" \
-    --app-drop-link 450 190 \
+    "${dmg_args[@]}" \
     "${DMG_PATH}" \
     "${STAGING_DIR}"
 }
 
 main() {
   [[ -d "${APP_BUNDLE}" ]] || die "App bundle not found. Run build.sh first: ${APP_BUNDLE}"
+
+  if [[ ! -f "${SCRIPT_DIR}/assets/VolumeIcon.icns" ]]; then
+    info "Volume icon missing; generating icons"
+    bash "${SCRIPT_DIR}/generate-icons.sh"
+  fi
 
   info "Staging DMG contents"
   rm -rf "${STAGING_DIR}"

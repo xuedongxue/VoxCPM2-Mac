@@ -25,6 +25,10 @@ jobs:
       - name: Install build dependencies
         run: |
           brew install ffmpeg create-dmg
+          python3 -m pip install pillow
+
+      - name: Generate app icons
+        run: bash packaging/mac/generate-icons.sh
 
       - name: Build .app bundle
         run: bash packaging/mac/build.sh

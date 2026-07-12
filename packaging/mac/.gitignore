@@ -2,5 +2,8 @@
 build/
 dist/
 
+# Icon generation intermediates
+assets/AppIcon.iconset/
+
 # Downloaded ffmpeg staging
 ffmpeg-dl/

@@ -9,7 +9,7 @@ BUILD_DIR="${SCRIPT_DIR}/build"
 DIST_DIR="${SCRIPT_DIR}/dist"
 APP_NAME="VoxCPM2"
 APP_BUNDLE="${DIST_DIR}/${APP_NAME}.app"
-VERSION="${VOXCPM_VERSION:-1.0.0}"
+VERSION="${VOXCPM_VERSION:-1.0.1}"
 
 die() {
   echo "ERROR: $*" >&2
@@ -151,10 +151,25 @@ for a in data.get('assets', []):
   die "Could not obtain ffmpeg. Install ffmpeg (brew install ffmpeg) or set FFMPEG_PATH."
 }
 
+ensure_app_icons() {
+  local icns="${SCRIPT_DIR}/assets/AppIcon.icns"
+  if [[ ! -f "${icns}" ]]; then
+    info "AppIcon.icns not found; generating from assets/voxcpm_logo.png"
+    bash "${SCRIPT_DIR}/generate-icons.sh"
+  fi
+  [[ -f "${icns}" ]] || die "AppIcon.icns missing. Run packaging/mac/generate-icons.sh"
+}
+
+copy_app_icons() {
+  cp "${SCRIPT_DIR}/assets/AppIcon.icns" \
+    "${BUILD_DIR}/bundle/Contents/Resources/AppIcon.icns"
+}
+
 assemble_bundle() {
   info "Assembling ${APP_NAME}.app bundle"
   cp "${SCRIPT_DIR}/launcher.sh" "${BUILD_DIR}/bundle/Contents/MacOS/${APP_NAME}"
   chmod +x "${BUILD_DIR}/bundle/Contents/MacOS/${APP_NAME}"
+  copy_app_icons
 
   sed "s/__VERSION__/${VERSION}/g" "${SCRIPT_DIR}/Info.plist.template" \
     > "${BUILD_DIR}/bundle/Contents/Info.plist"
@@ -202,6 +217,7 @@ main() {
   info "Building ${APP_NAME}.app v${VERSION}"
   info "Repository root: ${REPO_ROOT}"
 
+  ensure_app_icons
   clean_build_tree
   create_venv "${python_bin}"
   copy_app_sources
