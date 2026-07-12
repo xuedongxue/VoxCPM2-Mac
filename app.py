@@ -4,8 +4,13 @@ import json
 import logging
 import os
 import queue
+import socket
+import subprocess
 import sys
 import tempfile
+import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock, Semaphore, Thread
@@ -131,11 +136,25 @@ _parse_cli_args()
 _configure_packaged_mode()
 _apply_default_model_resolution()
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
-)
+_PACKAGED_LOG_FILE = _get_voxcpm_home() / "app.log" if _PACKAGED_MODE else None
+
+
+def _setup_logging() -> None:
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
+    if _PACKAGED_MODE and _PACKAGED_LOG_FILE is not None:
+        _PACKAGED_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(
+            logging.FileHandler(_PACKAGED_LOG_FILE, encoding="utf-8")
+        )
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        handlers=handlers,
+        force=True,
+    )
+
+
+_setup_logging()
 logger = logging.getLogger(__name__)
 DEFAULT_ASR_MODEL_REF = "FunAudioLLM/SenseVoiceSmall"
 DEFAULT_ZIPENHANCER_MODEL = "iic/speech_zipenhancer_ans_multiloss_16k_base"
@@ -653,9 +672,9 @@ _CUSTOM_CSS = """
     margin: 0.5rem 0 1rem 0;
 }
 .logo-container img {
-    height: 72px;
+    height: 80px;
     width: auto;
-    max-width: 120px;
+    max-width: 200px;
     display: inline-block;
 }
 
@@ -1367,7 +1386,7 @@ def create_demo_interface():
                     label="",
                     show_label=False,
                     format="png",
-                    height=72,
+                    height=80,
                     sources=[],
                     interactive=False,
                     container=False,
@@ -1501,25 +1520,116 @@ def create_demo_interface():
     return interface
 
 
+def _is_gradio_server_up(host: str = "127.0.0.1", port: int = 7860) -> bool:
+    url = f"http://{host}:{port}/"
+    try:
+        with urllib.request.urlopen(url, timeout=1.5) as response:
+            return response.status == 200
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return False
+
+
+def _open_browser(url: str) -> None:
+    if sys.platform == "darwin":
+        try:
+            subprocess.Popen(
+                ["open", url],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            return
+        except OSError as exc:
+            logger.warning(f"Failed to open browser via macOS open: {exc}")
+    try:
+        import webbrowser
+
+        webbrowser.open(url, new=0, autoraise=True)
+    except Exception as exc:
+        logger.warning(f"Failed to open browser: {exc}")
+
+
+def _focus_existing_packaged_instance(host: str, port: int) -> bool:
+    if not _is_gradio_server_up(host, port):
+        return False
+    url = f"http://{host}:{port}/"
+    logger.info(f"VoxCPM2 is already running at {url}")
+    _open_browser(url)
+    return True
+
+
+def _resolve_packaged_port(
+    host: str, start_port: int, end_port: int
+) -> tuple[int, bool]:
+    for port in range(start_port, end_port + 1):
+        if _is_gradio_server_up(host, port):
+            return port, True
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind((host, port))
+            except OSError:
+                continue
+            return port, False
+    raise OSError(
+        f"Cannot find empty port in range: {start_port}-{end_port}. "
+        "Set GRADIO_SERVER_PORT or PORT to use a different port."
+    )
+
+
+def _start_packaged_browser_opener(host: str, port: int) -> None:
+    url = f"http://{host}:{port}/"
+
+    def _wait_and_open() -> None:
+        for _ in range(120):
+            if _is_gradio_server_up(host, port):
+                logger.info(f"Opening browser at {url}")
+                _open_browser(url)
+                return
+            time.sleep(0.25)
+        logger.warning(f"Timed out waiting for Gradio at {url}")
+
+    Thread(
+        target=_wait_and_open,
+        name="voxcpm2-browser-opener",
+        daemon=True,
+    ).start()
+
+
 def run_demo(
     server_name: str = "0.0.0.0", server_port: int = 7860, show_error: bool = True
 ):
+    host = "127.0.0.1" if _PACKAGED_MODE else server_name
+    default_port = int(os.environ.get("PORT", server_port))
+    port = default_port
+    if _PACKAGED_MODE:
+        if "PORT" not in os.environ:
+            port, already_running = _resolve_packaged_port(
+                host, default_port, default_port + 10
+            )
+            if already_running:
+                url = f"http://{host}:{port}/"
+                logger.info(f"VoxCPM2 is already running at {url}")
+                _open_browser(url)
+                return
+        elif _focus_existing_packaged_instance(host, port):
+            return
+
     interface = create_demo_interface()
     _start_background_prewarm()
     launch_kwargs = dict(
-        server_name="127.0.0.1" if _PACKAGED_MODE else server_name,
-        server_port=int(os.environ.get("PORT", server_port)),
+        server_name=host,
+        server_port=port,
         show_error=show_error,
         i18n=I18N,
         theme=_APP_THEME,
         css=_CUSTOM_CSS,
         ssr_mode=_get_bool_env("GRADIO_SSR_MODE", False),
     )
-    favicon_file = Path(__file__).resolve().parent / "assets" / "favicon.png"
-    if favicon_file.is_file():
-        launch_kwargs["favicon_path"] = str(favicon_file.resolve())
     if _PACKAGED_MODE:
-        launch_kwargs["inbrowser"] = True
+        _start_packaged_browser_opener(host, port)
+    else:
+        launch_kwargs["inbrowser"] = _get_bool_env("GRADIO_INBROWSER", False)
     interface.queue(
         max_size=_get_int_env("GRADIO_QUEUE_MAX_SIZE", 10),
         default_concurrency_limit=_get_int_env("GRADIO_DEFAULT_CONCURRENCY_LIMIT", 4),
