@@ -592,17 +592,12 @@ _I18N_TRANSLATIONS = {
         ),
         "model_load_failed_error": "Model saved but failed to load: {error}",
         "model_picker_opening": (
-            "Opening folder picker… If you do not see a dialog, check Finder or "
-            "use **Load from path** below."
+            "Opening folder picker… If you do not see a dialog, check Finder."
         ),
         "model_picker_failed": (
-            "Folder picker did not return a path. Try again, or paste a path and click "
-            "**Load from path**."
+            "Folder picker did not return a path. Please try again."
         ),
         "model_loading_progress": "Loading model… This may take a few minutes for large weights.",
-        "model_path_input_label": "Model folder path (manual fallback)",
-        "model_path_input_placeholder": "/path/to/VoxCPM2",
-        "model_load_path_btn": "Load from path",
     },
     "zh-CN": {
         "reference_audio_label": "🎤 参考音频（可选 — 上传后用于克隆）",
@@ -640,15 +635,12 @@ _I18N_TRANSLATIONS = {
         "model_invalid_path_error": "无效的模型目录：路径必须存在、为文件夹，且包含 config.json。",
         "model_load_failed_error": "配置已保存，但模型加载失败：{error}",
         "model_picker_opening": (
-            "正在打开文件夹选择器… 若未看到对话框，请检查 Finder，或使用下方的 **从路径加载**。"
+            "正在打开文件夹选择器… 若未看到对话框，请检查 Finder。"
         ),
         "model_picker_failed": (
-            "未选择文件夹。请重试，或在下方粘贴路径后点击 **从路径加载**。"
+            "未选择文件夹。请重试。"
         ),
         "model_loading_progress": "正在加载模型… 大型权重可能需要几分钟。",
-        "model_path_input_label": "模型目录路径（手动备用）",
-        "model_path_input_placeholder": "/path/to/VoxCPM2",
-        "model_load_path_btn": "从路径加载",
     },
     "zh-Hans": None,
     "zh": None,
@@ -1453,19 +1445,6 @@ def _offer_first_run_model_picker() -> None:
     return
 
 
-def _load_model_from_path(
-    model_path: str, request: Optional[gr.Request] = None
-) -> tuple[str, str]:
-    path = (model_path or "").strip()
-    if not path or path == _get_i18n_text("model_path_none", request):
-        raise ValueError(_get_i18n_text("model_invalid_path_error", request))
-    if not _is_valid_model_dir(path):
-        raise ValueError(_get_i18n_text("model_invalid_path_error", request))
-    abs_path = str(Path(path).expanduser().resolve())
-    status = _save_and_reload_model(abs_path, request)
-    return abs_path, status
-
-
 def _choose_and_load_model(
     current_path: str = "", request: Optional[gr.Request] = None
 ):
@@ -1530,40 +1509,6 @@ def _choose_and_load_model(
                 ),
             )
 
-    yield abs_path, status
-
-
-def _load_model_from_path_with_progress(
-    model_path: str, request: Optional[gr.Request] = None
-):
-    display_path = _display_model_path(model_path, request)
-    loading = _get_i18n_text("model_loading_progress", request)
-    yield display_path, _status_message(display_path, message=loading, request=request)
-
-    load_thread, load_queue = _run_in_thread(
-        _load_model_from_path, model_path, request
-    )
-    while load_thread.is_alive():
-        yield display_path, _status_message(display_path, message=loading, request=request)
-        load_thread.join(timeout=0.5)
-
-    try:
-        kind, result = load_queue.get_nowait()
-    except queue.Empty:
-        yield display_path, _status_message(
-            display_path,
-            loaded=False,
-            error=_get_i18n_text("model_load_failed_error", request).format(
-                error="timed out"
-            ),
-            request=request,
-        )
-        return
-
-    if kind == "err":
-        raise gr.Error(str(result))
-
-    abs_path, status = result
     yield abs_path, status
 
 
@@ -1676,26 +1621,11 @@ def create_demo_interface():
                     I18N("model_choose_btn"),
                     variant="primary",
                 )
-                model_path_input = gr.Textbox(
-                    label=I18N("model_path_input_label"),
-                    placeholder=I18N("model_path_input_placeholder"),
-                    lines=1,
-                )
-                load_path_btn = gr.Button(
-                    I18N("model_load_path_btn"),
-                    variant="secondary",
-                )
                 model_status = gr.Markdown(value=_format_model_status())
 
                 choose_btn.click(
                     fn=_choose_and_load_model,
                     inputs=[model_path_display],
-                    outputs=[model_path_display, model_status],
-                    show_progress="full",
-                )
-                load_path_btn.click(
-                    fn=_load_model_from_path_with_progress,
-                    inputs=[model_path_input],
                     outputs=[model_path_display, model_status],
                     show_progress="full",
                 )
